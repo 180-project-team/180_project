@@ -97,6 +97,12 @@ class DiagnosticSignal:
 
 @dataclass
 class DiagnosisReport:
+    """Observed failures and warnings; FAILURE_FOUND need not mean final failure.
+
+    A recovered tool error remains an observation. critical_step is only a
+    candidate location and may be absent even when a failure was observed.
+    """
+
     case_id: str | int | None
     run_id: str | None
     version_id: str | None
@@ -107,8 +113,39 @@ class DiagnosisReport:
     rationale: str
     confidence: Confidence
     suggested_scope: SuggestedScope
+    signals: list[DiagnosticSignal] = field(default_factory=list)
+
+
+@dataclass
+class BehaviorPattern:
+    """A rule observed in multiple reports of one run and version."""
+
+    rule_id: str
+    failure_type: FailureType
+    level: SignalLevel
+    run_id: str | None
+    version_id: str | None
+    report_indices: list[int]
+
+
+@dataclass
+class DiagnosisSummary:
+    """Indices refer to batch reports; counts use one category per failed case.
+
+    Warning-only cases and diagnostic errors are excluded from failure counts.
+    Individual reports preserve source identity in mixed batches.
+    """
+
+    analyzed_cases: int = 0
+    failed_cases: int = 0
+    failure_counts: dict[FailureType, int] = field(default_factory=dict)
+    report_indices: list[int] = field(default_factory=list)
+    patterns: list[BehaviorPattern] = field(default_factory=list)
+    run_id: str | None = None
+    version_id: str | None = None
 
 
 @dataclass
 class DiagnosisBatchResult:
     reports: list[DiagnosisReport] = field(default_factory=list)
+    summary: DiagnosisSummary = field(default_factory=DiagnosisSummary)

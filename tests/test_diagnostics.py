@@ -23,14 +23,17 @@ class DiagnosticsContractTests(unittest.TestCase):
 
         self.assertEqual(results, original)
         self.assertEqual([report.case_id for report in batch.reports], ["a", 7, None])
+        self.assertEqual([report.status for report in batch.reports], [
+            DiagnosisStatus.NO_FAILURE_DETECTED, DiagnosisStatus.FAILURE_FOUND,
+            DiagnosisStatus.INSUFFICIENT_DATA,
+        ])
         for report in batch.reports:
             self.assertEqual((report.run_id, report.version_id), ("run", "v1"))
-            self.assertEqual(report.status, DiagnosisStatus.INSUFFICIENT_DATA)
             self.assertEqual(report.failure_type, FailureType.UNKNOWN)
-            self.assertEqual(report.confidence, Confidence.LOW)
             self.assertEqual(report.suggested_scope, SuggestedScope.UNKNOWN)
             self.assertIsNone(report.critical_step)
-            self.assertEqual(report.evidence_refs, [])
+        self.assertEqual(batch.summary.analyzed_cases, 3)
+        self.assertEqual(batch.summary.failed_cases, 1)
 
     def test_empty_batch(self):
         self.assertEqual(diagnose([]).reports, [])
@@ -105,7 +108,7 @@ class TraceNormalizerTests(unittest.TestCase):
         malformed = normalize_trace({"trajectory": "opaque", "search_history": {}})
         self.assertEqual([event.event_type for event in malformed], [TraceEventType.UNKNOWN] * 2)
 
-    def test_tool_error_is_preserved_without_diagnosing_it(self):
+    def test_tool_error_is_preserved_as_an_observation(self):
         result = {"trajectory": [{"role": "assistant", "tool_results": [
             {"tool_call_id": "call", "name": "search_documents", "error": "Invalid query format"}
         ]}]}
@@ -113,7 +116,7 @@ class TraceNormalizerTests(unittest.TestCase):
         self.assertEqual(event.event_type, TraceEventType.TOOL_RESULT)
         self.assertEqual(event.payload_ref.path, ["trajectory", 0, "tool_results", 0])
         self.assertEqual(event.step_index, 0)
-        self.assertEqual(diagnose([result]).reports[0].status, DiagnosisStatus.INSUFFICIENT_DATA)
+        self.assertEqual(diagnose([result]).reports[0].status, DiagnosisStatus.FAILURE_FOUND)
 
 
 if __name__ == "__main__":

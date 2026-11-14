@@ -7,6 +7,7 @@ from .models import (
     Confidence, DiagnosisBatchResult, DiagnosisReport, DiagnosisStatus,
     EvidenceRef, FailureType, SuggestedScope, TraceEvent, TraceEventType,
     DiagnosticSignal, SignalLevel,
+    BehaviorPattern, DiagnosisSummary,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "DiagnosisStatus", "EvidenceRef", "FailureType", "SuggestedScope",
     "normalize_trace", "TraceEvent", "TraceEventType",
     "check_rules", "DiagnosticSignal", "SignalLevel",
+    "BehaviorPattern", "DiagnosisSummary",
 ]
