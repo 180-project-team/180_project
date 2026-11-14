@@ -41,11 +41,38 @@ class Confidence(str, Enum):
     HIGH = "high"
 
 
+class TraceEventType(str, Enum):
+    MODEL_RESPONSE = "MODEL_RESPONSE"
+    TOOL_CALL = "TOOL_CALL"
+    TOOL_RESULT = "TOOL_RESULT"
+    SEARCH_OBSERVATION = "SEARCH_OBSERVATION"
+    FINAL_ANSWER = "FINAL_ANSWER"
+    EXECUTION_ERROR = "EXECUTION_ERROR"
+    UNKNOWN = "UNKNOWN"
+
+
 @dataclass
 class EvidenceRef:
     """A path into the original result, using field names and list indices."""
 
     path: list[str | int]
+
+
+@dataclass
+class TraceEvent:
+    """One observation; identifiers and references are local to a runner row.
+
+    step_index is the zero-based trajectory position, not MADQA's iteration.
+    Events outside trajectory have no known step. event_id is derived from
+    the source path, not an identifier supplied by the agent.
+    """
+
+    event_id: str
+    step_index: int | None
+    event_type: TraceEventType
+    component_id: str | None
+    payload_ref: EvidenceRef
+    tool_call_id: str | None = None
 
 
 @dataclass
