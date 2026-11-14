@@ -1,0 +1,25 @@
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local environment
+.venv/
+venv/
+.env
+
+# Runner output
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local environment
+.venv/
+venv/
+.env
+
+# Runner output
+output/
+.DS_Store
