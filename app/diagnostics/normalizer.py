@@ -30,6 +30,8 @@ def normalize_trace(result: Mapping[str, Any]) -> list[TraceEvent]:
         step_index: int | None = None,
         component: Any = None,
         call_id: Any = None,
+        query: Any = None,
+        error_ref: EvidenceRef | None = None,
     ) -> None:
         events.append(TraceEvent(
             event_id="/" + "/".join(str(part) for part in path),
@@ -38,6 +40,8 @@ def normalize_trace(result: Mapping[str, Any]) -> list[TraceEvent]:
             component_id=component if isinstance(component, str) else None,
             payload_ref=EvidenceRef(path),
             tool_call_id=call_id if isinstance(call_id, str) else None,
+            search_query=query if isinstance(query, str) else None,
+            error_ref=error_ref,
         ))
 
     trace = result.get("trajectory")
@@ -60,8 +64,16 @@ def normalize_trace(result: Mapping[str, Any]) -> list[TraceEvent]:
                     for number, entry in enumerate(entries):
                         entry_path = path + [field, number]
                         if isinstance(entry, Mapping):
+                            arguments = entry.get("arguments")
+                            query = (arguments.get("query") if isinstance(arguments, Mapping)
+                                     and event_type == TraceEventType.TOOL_CALL
+                                     else entry.get("query"))
+                            error_ref = (EvidenceRef(entry_path + ["error"])
+                                         if entry.get("error") else None)
                             add(entry_path, event_type, index,
-                                entry.get("name"), entry.get(id_field))
+                                entry.get("name"), entry.get(id_field),
+                                query if entry.get("name") == "search_documents" else None,
+                                error_ref)
                         else:
                             add(entry_path, TraceEventType.UNKNOWN, index)
                 elif entries is not None:
@@ -77,7 +89,8 @@ def normalize_trace(result: Mapping[str, Any]) -> list[TraceEvent]:
             kind = (TraceEventType.SEARCH_OBSERVATION
                     if isinstance(entry, Mapping) and "query" in entry
                     else TraceEventType.UNKNOWN)
-            add(["search_history", index], kind)
+            add(["search_history", index], kind,
+                query=entry.get("query") if isinstance(entry, Mapping) else None)
     elif history is not None:
         add(["search_history"], TraceEventType.UNKNOWN)
 

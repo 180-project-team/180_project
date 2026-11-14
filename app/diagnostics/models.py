@@ -51,6 +51,11 @@ class TraceEventType(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class SignalLevel(str, Enum):
+    FAILURE = "FAILURE"
+    WARNING = "WARNING"
+
+
 @dataclass
 class EvidenceRef:
     """A path into the original result, using field names and list indices."""
@@ -73,6 +78,21 @@ class TraceEvent:
     component_id: str | None
     payload_ref: EvidenceRef
     tool_call_id: str | None = None
+    search_query: str | None = None
+    error_ref: EvidenceRef | None = None
+
+
+@dataclass
+class DiagnosticSignal:
+    """An observed violation or a warning, not a root-cause conclusion."""
+
+    rule_id: str
+    failure_type: FailureType
+    level: SignalLevel
+    step_index: int | None
+    evidence_refs: list[EvidenceRef]
+    rationale: str
+    confidence: Confidence
 
 
 @dataclass
