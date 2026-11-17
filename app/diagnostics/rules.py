@@ -81,8 +81,8 @@ def check_rules(
     A validator returns False for a known output-contract violation; exceptions
     propagate as caller/validator errors. Without it, arbitrary nonempty answers
     are accepted. Missing answers are checked only for completed (ok) runs.
-    Search queries are compared exactly. Calls, results, then search history are
-    preferred as a single source; partial sources can therefore miss repeats.
+    Search queries are compared exactly. Results are used when an event stream
+    contains no search calls.
     """
     signals: list[DiagnosticSignal] = []
     if result.get("status") == "error":
@@ -125,8 +125,7 @@ def check_rules(
                 "The final answer fails the caller-supplied output contract.", Confidence.HIGH,
             ))
 
-    for kind in (TraceEventType.TOOL_CALL, TraceEventType.TOOL_RESULT,
-                 TraceEventType.SEARCH_OBSERVATION):
+    for kind in (TraceEventType.TOOL_CALL, TraceEventType.TOOL_RESULT):
         searches = [event for event in events
                     if event.event_type == kind and event.search_query
                     and event.search_query.strip()]

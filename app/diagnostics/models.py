@@ -45,7 +45,6 @@ class TraceEventType(str, Enum):
     MODEL_RESPONSE = "MODEL_RESPONSE"
     TOOL_CALL = "TOOL_CALL"
     TOOL_RESULT = "TOOL_RESULT"
-    SEARCH_OBSERVATION = "SEARCH_OBSERVATION"
     FINAL_ANSWER = "FINAL_ANSWER"
     EXECUTION_ERROR = "EXECUTION_ERROR"
     UNKNOWN = "UNKNOWN"
@@ -67,7 +66,7 @@ class EvidenceRef:
 class TraceEvent:
     """One observation; identifiers and references are local to a runner row.
 
-    step_index is the zero-based trajectory position, not MADQA's iteration.
+    step_index is the zero-based trajectory position.
     Events outside trajectory have no known step. event_id is derived from
     the source path, not an identifier supplied by the agent.
     """

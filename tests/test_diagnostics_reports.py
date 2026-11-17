@@ -12,9 +12,10 @@ from app.diagnostics import (
 
 
 def tool_step(error=None):
-    payload = {"name": "search_documents", "tool_call_id": "call"}
-    payload.update({"error": error} if error else {"results": []})
-    return {"role": "assistant", "tool_results": [payload]}
+    return {
+        "action": "bm25_search",
+        "observation": f"ERROR: {error}" if error else "Results",
+    }
 
 
 class DiagnosisReportTests(unittest.TestCase):
@@ -50,7 +51,7 @@ class DiagnosisReportTests(unittest.TestCase):
 
     def test_terminal_tool_error_has_candidate_step_and_all_signals(self):
         row = {"status": "error", "error": "failure",
-               "trajectory": [{"role": "assistant"}, tool_step("Timeout")]}
+               "trajectory": [{"action": "none"}, tool_step("Timeout")]}
         batch = diagnose([row])
         report = batch.reports[0]
         self.assertEqual(report.failure_type, FailureType.TOOL_EXECUTION_FAILURE)
@@ -71,16 +72,15 @@ class DiagnosisReportTests(unittest.TestCase):
 
     def test_ambiguous_errors_and_later_events_have_no_critical_step(self):
         for trace in ([tool_step("Timeout"), tool_step("Timeout")],
-                      [tool_step("Timeout"), {"role": "assistant"}],
-                      [{"role": "assistant", "tool_results": [
-                          {"error": "Timeout"}, {"results": []}]}]):
+                      [tool_step("Timeout"), {"action": "none"}],
+                      [tool_step("Timeout"), tool_step()]):
             with self.subTest(trace=trace):
                 report = diagnose([{"status": "error", "trajectory": trace}]).reports[0]
                 self.assertIsNone(report.critical_step)
 
     def test_warnings_are_retained_but_not_counted_as_failures(self):
         rows = [{"id": "duplicate-id", "status": "ok", "answer": "42",
-                 "search_history": [{"query": "q"}, {"query": "q"}]} for _ in range(2)]
+                 "trajectory": [{"action": "bm25_search", "query": "q"} for _ in range(2)]} for _ in range(2)]
         batch = diagnose(rows)
         for report in batch.reports:
             self.assertEqual(report.status, DiagnosisStatus.NO_FAILURE_DETECTED)
@@ -126,9 +126,9 @@ class DiagnosisReportTests(unittest.TestCase):
         report = diagnose([row], answer_validator=broken).reports[0]
         self.assertEqual(report.status, DiagnosisStatus.DIAGNOSTIC_ERROR)
 
-    def test_optional_evaluations_do_not_invent_semantic_failures(self):
-        row = {"status": "ok", "answer": "text"}
-        batch = diagnose([row], evaluations={"score": 0})
+    def test_unrecognized_metrics_do_not_invent_semantic_failures(self):
+        row = {"status": "ok", "answer": "text", "metrics": {"unknown_score": 0}}
+        batch = diagnose([row])
         self.assertEqual(batch.reports[0].status, DiagnosisStatus.NO_FAILURE_DETECTED)
 
     def test_empty_batch_has_empty_summary(self):

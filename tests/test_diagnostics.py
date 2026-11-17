@@ -40,7 +40,7 @@ class DiagnosticsContractTests(unittest.TestCase):
             {},
         ]
         original = copy.deepcopy(results)
-        batch = diagnose(results, evaluations={"unused": 1}, run_id="run", version_id="v1")
+        batch = diagnose(results, run_id="run", version_id="v1")
 
         self.assertEqual(results, original)
         self.assertEqual([report.case_id for report in batch.reports], ["a", 7, None])
@@ -67,36 +67,28 @@ class DiagnosticsContractTests(unittest.TestCase):
 
 
 class TraceNormalizerTests(unittest.TestCase):
-    def test_madqa_events_preserve_paths_steps_and_tool_identity(self):
+    def test_skim_events_preserve_paths_steps_and_tool_identity(self):
         result = {
-            "id": "case",
             "trajectory": [
-                {"iteration": 1, "role": "assistant", "content": None,
-                 "tool_calls": [{"id": "call1", "name": "search_documents",
-                                 "arguments": {"query": "revenue"}}],
-                 "tool_results": [{"tool_call_id": "call1", "name": "search_documents",
-                                   "query": "revenue", "results": []}]},
-                {"iteration": 2, "role": "assistant",
-                 "tool_calls": [{"id": "call2", "name": "provide_answer",
-                                 "arguments": {"answer": ["42"], "citations": []}}],
-                 "parsed_answer": {"answer": ["42"], "citations": []}},
+                {"action": "bm25_search", "args": {"query": "revenue"}, "query": "revenue",
+                 "observation": "One result", "hit_ids": ["report"]},
+                {"action": "visit", "args": {"rank": 1}, "observation": "Revenue was 42.",
+                 "read_ids": ["report"]},
+                {"action": "answer"},
             ],
-            "search_history": [{"iteration": 1, "query": "revenue", "num_results": 0}],
-            "answer": ["42"],
+            "answer": "42",
         }
         original = copy.deepcopy(result)
         events = normalize_trace(result)
         self.assertEqual([event.event_type for event in events], [
-            TraceEventType.MODEL_RESPONSE, TraceEventType.TOOL_CALL,
-            TraceEventType.TOOL_RESULT, TraceEventType.MODEL_RESPONSE,
-            TraceEventType.TOOL_CALL, TraceEventType.FINAL_ANSWER,
-            TraceEventType.SEARCH_OBSERVATION, TraceEventType.FINAL_ANSWER,
+            TraceEventType.TOOL_CALL, TraceEventType.TOOL_RESULT,
+            TraceEventType.TOOL_CALL, TraceEventType.TOOL_RESULT,
+            TraceEventType.FINAL_ANSWER, TraceEventType.FINAL_ANSWER,
         ])
-        self.assertEqual([event.step_index for event in events], [0, 0, 0, 1, 1, 1, None, None])
-        self.assertEqual(events[1].component_id, "search_documents")
-        self.assertEqual(events[1].tool_call_id, events[2].tool_call_id)
-        self.assertEqual(events[1].tool_call_id, "call1")
-        self.assertEqual(events[2].payload_ref.path, ["trajectory", 0, "tool_results", 0])
+        self.assertEqual([event.step_index for event in events], [0, 0, 1, 1, 2, None])
+        self.assertEqual(events[0].component_id, "bm25_search")
+        self.assertEqual(events[0].tool_call_id, events[1].tool_call_id)
+        self.assertEqual(events[1].payload_ref.path, ["trajectory", 0, "observation"])
         self.assertEqual(len({event.event_id for event in events}), len(events))
         for event in events:
             value = result
@@ -116,26 +108,21 @@ class TraceNormalizerTests(unittest.TestCase):
         self.assertTrue(all(event.step_index is None for event in events))
 
     def test_partial_and_unknown_entries_remain_addressable(self):
-        result = {"trajectory": ["opaque", {}, {"role": "assistant", "tool_calls": [None, {}],
-                   "tool_results": {"unexpected": "shape"}}],
-                  "search_history": ["opaque", {"query": "test"}]}
+        result = {"trajectory": ["opaque", {}, {"action": "visit"}]}
         events = normalize_trace(result)
-        self.assertEqual(events[0].event_type, TraceEventType.UNKNOWN)
+        self.assertEqual([event.event_type for event in events], [
+            TraceEventType.UNKNOWN, TraceEventType.UNKNOWN, TraceEventType.TOOL_CALL,
+        ])
         self.assertEqual(events[0].payload_ref.path, ["trajectory", 0])
-        call = next(event for event in events if event.event_type == TraceEventType.TOOL_CALL)
-        self.assertIsNone(call.component_id)
-        self.assertIsNone(call.tool_call_id)
-        self.assertTrue(all(event.step_index is None for event in events[-2:]))
-        malformed = normalize_trace({"trajectory": "opaque", "search_history": {}})
-        self.assertEqual([event.event_type for event in malformed], [TraceEventType.UNKNOWN] * 2)
+        self.assertEqual(events[-1].component_id, "visit")
+        event, = normalize_trace({"trajectory": "opaque"})
+        self.assertEqual(event.event_type, TraceEventType.UNKNOWN)
 
     def test_tool_error_is_preserved_as_an_observation(self):
-        result = {"trajectory": [{"role": "assistant", "tool_results": [
-            {"tool_call_id": "call", "name": "search_documents", "error": "Invalid query format"}
-        ]}]}
-        event = normalize_trace(result)[1]
+        result = {"trajectory": [{"action": "bm25_search", "observation": "ERROR: timeout"}]}
+        _, event = normalize_trace(result)
         self.assertEqual(event.event_type, TraceEventType.TOOL_RESULT)
-        self.assertEqual(event.payload_ref.path, ["trajectory", 0, "tool_results", 0])
+        self.assertEqual(event.error_ref.path, ["trajectory", 0, "observation"])
         self.assertEqual(event.step_index, 0)
         self.assertEqual(diagnose([result]).reports[0].status, DiagnosisStatus.FAILURE_FOUND)
 

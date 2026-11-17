@@ -116,7 +116,6 @@ def _report(
 
 def diagnose(
     results: Iterable[Mapping[str, Any]],
-    evaluations: Any = None,
     *,
     run_id: str | None = None,
     version_id: str | None = None,
@@ -127,8 +126,8 @@ def diagnose(
 ) -> DiagnosisBatchResult:
     """Diagnose runner rows in order without mutating them.
 
-    Batch identifiers override per-row identifiers when supplied. Evaluations
-    remain reserved and unused; low metrics alone do not establish a cause.
+    Batch identifiers override per-row identifiers when supplied.
+    Quality metrics are read from each row.
     Normalizer/validator exceptions become DIAGNOSTIC_ERROR for that case;
     errors iterating the batch and non-mapping rows propagate to the caller.
     """

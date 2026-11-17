@@ -71,49 +71,39 @@ class DiagnosticRuleTests(unittest.TestCase):
 
     def test_tool_error_is_an_observation_even_if_agent_later_succeeds(self):
         result = {"status": "ok", "answer": "42", "trajectory": [
-            {"role": "assistant", "tool_results": [{"name": "search_documents", "error": "Timeout"}]},
-            {"role": "assistant", "parsed_answer": {"answer": ["42"]}},
+            {"action": "bm25_search", "observation": "ERROR: Timeout"},
+            {"action": "answer"},
         ]}
         signal, = self.check(result)
         self.assertEqual(signal.rule_id, "tool_error")
         self.assertEqual(signal.step_index, 0)
-        self.assertEqual(signal.evidence_refs[0].path, ["trajectory", 0, "tool_results", 0, "error"])
+        self.assertEqual(signal.evidence_refs[0].path, ["trajectory", 0, "observation"])
 
-    def test_empty_tool_error_and_error_word_in_content_do_not_trigger(self):
-        result = {"trajectory": [{"role": "assistant", "content": "error",
-                                  "tool_results": [{"error": ""}, {"results": ["error"]}]}]}
+    def test_error_word_in_document_text_does_not_trigger(self):
+        result = {"trajectory": [
+            {"action": "visit", "observation": "The document explains the error."},
+            {"action": "visit", "observation": ""},
+        ]}
         self.assertEqual(self.check(result), [])
 
-    def test_repeated_search_is_warning_with_all_occurrences(self):
-        result = {"search_history": [{"query": "same"}, {"query": "other"}, {"query": "same"}]}
-        signal, = self.check(result)
+    def test_repeated_search_counts_each_call_once(self):
+        steps = [
+            {"action": "bm25_search", "query": query, "observation": "Listing"}
+            for query in ("same", "other", "same")
+        ]
+        self.assertEqual(self.check({"trajectory": steps[:2]}), [])
+        signal, = self.check({"trajectory": steps})
         self.assertEqual(signal.level, SignalLevel.WARNING)
         self.assertEqual(signal.confidence, Confidence.LOW)
         self.assertEqual(signal.failure_type, FailureType.INEFFICIENT_LOOP)
-        self.assertIsNone(signal.step_index)
+        self.assertEqual(signal.step_index, 2)
         self.assertEqual([ref.path for ref in signal.evidence_refs],
-                         [["search_history", 0], ["search_history", 2]])
+                         [["trajectory", 0], ["trajectory", 2]])
 
-    def test_duplicated_history_and_tool_result_are_not_extra_searches(self):
-        step = {"role": "assistant",
-                "tool_calls": [{"name": "search_documents", "arguments": {"query": "same"}}],
-                "tool_results": [{"name": "search_documents", "query": "same", "results": []}]}
-        result = {"trajectory": [step], "search_history": [{"query": "same"}]}
+    def test_search_query_matching_is_exact(self):
+        result = {"trajectory": [{"action": "bm25_search", "query": query}
+                                 for query in ("Q", "q", " ", " ")]}
         self.assertEqual(self.check(result), [])
-        result["trajectory"].append(copy.deepcopy(step))
-        signal, = self.check(result)
-        self.assertEqual(signal.step_index, 1)
-        self.assertEqual(len(signal.evidence_refs), 2)
-
-    def test_search_results_fallback_and_exact_query_matching(self):
-        result = {"trajectory": [{"tool_results": [
-            {"name": "search_documents", "query": "q"},
-            {"name": "search_documents", "query": "q"},
-        ]}]}
-        self.assertEqual(len(self.check(result)), 1)
-        self.assertEqual(self.check({"search_history": [
-            {"query": "Q"}, {"query": "q"}, {"query": " "}, {"query": " "}
-        ]}), [])
 
     def test_rules_accept_events_from_an_independent_normalizer(self):
         result = {"custom": [{"failure": "timeout"}]}
