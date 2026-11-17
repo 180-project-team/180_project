@@ -3,6 +3,7 @@
 from .core import diagnose, diagnose_case
 from .normalizer import normalize_trace
 from .rules import check_rules
+from .skim import skim_case
 from .models import (
     Confidence, DiagnosisBatchResult, DiagnosisReport, DiagnosisStatus,
     EvidenceRef, FailureType, SuggestedScope, TraceEvent, TraceEventType,
@@ -14,6 +15,6 @@ __all__ = [
     "diagnose", "diagnose_case", "Confidence", "DiagnosisBatchResult", "DiagnosisReport",
     "DiagnosisStatus", "EvidenceRef", "FailureType", "SuggestedScope",
     "normalize_trace", "TraceEvent", "TraceEventType",
-    "check_rules", "DiagnosticSignal", "SignalLevel",
+    "check_rules", "skim_case", "DiagnosticSignal", "SignalLevel",
     "BehaviorPattern", "DiagnosisSummary",
 ]

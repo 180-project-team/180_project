@@ -96,6 +96,18 @@ diagnose(
 
 Пустая пачка возвращает пустой список отчётов и сводку с нулевыми счётчиками.
 
+### Сохранённые прогоны Skim Search
+
+```shell
+uv run --locked python -m examples.diagnose_skim path/to/rows.jsonl
+```
+
+Команда печатает один диагностический отчёт на строку. Для вызова из Python
+используйте `diagnose_case(skim_case(row))`. Импортёр сопоставляет
+`instance_id` с `case_id`, `final_answer` с `answer` и выделяет численные
+метрики конкретного эпизода. Строки, помеченные Skim как `skipped`, пропускаются
+в примере CLI. При отсутствии причины завершения статус равен `unknown`.
+
 ## Выходной контракт
 
 `DiagnosisBatchResult` содержит `reports: list[DiagnosisReport]` и
@@ -222,11 +234,10 @@ batch = diagnose(
 для ошибок инструментов — событие `TOOL_RESULT` с `error_ref`. Diagnostics доверяет
 контракту нормализатора и не проверяет разрешимость произвольных пользовательских ссылок.
 
-По умолчанию поддержан MADQA: `role`, `tool_calls` с `id`/`name`/`arguments`,
-`tool_results` с `tool_call_id`/`name`/`results`/`error`, `parsed_answer`,
-`search_history`. Поиск распознаётся по имени `search_documents`.
-Неизвестные записи сохраняются как `UNKNOWN`; отсутствующие вызовы модели
-и передача контекста не восстанавливаются. `citations` отдельно не анализируются.
+Стандартный формат Skim Search использует `action`, `args`, `query`,
+`observation`, `hit_ids` и `read_ids`. Для старых записей Runner
+поддерживаются вложенные `tool_calls` и `tool_results`. Неизвестные записи
+сохраняются как `UNKNOWN`. Полный вход финальной модели может отсутствовать.
 
 Для отдельных проверок доступны `normalize_trace(result)` и
 `check_rules(result, events, answer_validator=...)`. В отличие от `diagnose`,

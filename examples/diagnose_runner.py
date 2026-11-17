@@ -25,24 +25,18 @@ class DemoAgent:
             return {
                 "answer": "Fallback answer",
                 "trajectory": [{
-                    "iteration": 1,
-                    "role": "assistant",
-                    "tool_calls": [{
-                        "id": "search-1", "name": "search_documents",
-                        "arguments": {"query": "revenue"},
-                    }],
-                    "tool_results": [{
-                        "tool_call_id": "search-1", "name": "search_documents",
-                        "error": "Synthetic tool timeout",
-                    }],
+                    "action": "bm25_search",
+                    "args": {"query": "revenue"},
+                    "query": "revenue",
+                    "observation": "ERROR: Synthetic tool timeout",
                 }],
             }
         if question == "repeated_search":
             return {
                 "answer": "42",
-                "search_history": [
-                    {"iteration": 1, "query": "revenue", "num_results": 0},
-                    {"iteration": 2, "query": "revenue", "num_results": 0},
+                "trajectory": [
+                    {"action": "bm25_search", "query": "revenue", "observation": "(0 matches)"}
+                    for _ in range(2)
                 ],
             }
         return {"answer": "42"}

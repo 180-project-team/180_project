@@ -1,9 +1,7 @@
 """Normalize runner rows without copying payloads or inferring missing events.
 
-Supported MADQA layout: trajectory entries with role/content, tool_calls
-(id, name, arguments), tool_results (tool_call_id, name, results/error),
-and parsed_answer. Source: OxRML/MADQA,
-baselines/bm25-mllm-agent/vllm_agent.py. Unknown entries remain addressable.
+Skim Search steps carry an action, arguments, and a tool observation.
+Historical runner rows may carry separate tool_calls and tool_results.
 """
 
 from __future__ import annotations
@@ -50,6 +48,24 @@ def normalize_trace(result: Mapping[str, Any]) -> list[TraceEvent]:
             path: list[str | int] = ["trajectory", index]
             if not isinstance(step, Mapping):
                 add(path, TraceEventType.UNKNOWN, index)
+                continue
+            action = step.get("action")
+            if isinstance(action, str):
+                if action in {"answer", "submit", "stop"}:
+                    add(path, TraceEventType.FINAL_ANSWER, index, action)
+                elif action in {"none", "budget"}:
+                    add(path, TraceEventType.MODEL_RESPONSE, index, action)
+                else:
+                    call_id = f"skim-step-{index}"
+                    query = step.get("query") if action == "bm25_search" else None
+                    add(path, TraceEventType.TOOL_CALL, index, action, call_id, query)
+                    observation = step.get("observation")
+                    if isinstance(observation, str):
+                        observation_path = path + ["observation"]
+                        error = (EvidenceRef(observation_path)
+                                 if observation.startswith("ERROR") else None)
+                        add(observation_path, TraceEventType.TOOL_RESULT, index,
+                            action, call_id, query, error)
                 continue
             # MADQA logs model responses, not the original model requests.
             kind = (TraceEventType.MODEL_RESPONSE
