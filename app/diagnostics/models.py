@@ -103,6 +103,13 @@ class Hypothesis:
     advice: str
 
 
+@dataclass(frozen=True)
+class ClassifierAttempt:
+    status: str
+    cost_usd: float | None = None
+    probabilities: dict[str, float] = field(default_factory=dict)
+
+
 @dataclass
 class DiagnosisReport:
     """Observed failures and warnings; FAILURE_FOUND need not mean final failure.
@@ -123,6 +130,7 @@ class DiagnosisReport:
     suggested_scope: SuggestedScope
     signals: list[DiagnosticSignal] = field(default_factory=list)
     hypotheses: list[Hypothesis] = field(default_factory=list)
+    classifier_attempt: ClassifierAttempt | None = None
 
 
 @dataclass
