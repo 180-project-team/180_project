@@ -2,7 +2,9 @@
 
 import unittest
 
-from app.diagnostics import DiagnosisStatus, FailureType, SignalLevel, diagnose_case, normalize_trace, skim_case
+from app.diagnostics import (
+    DiagnosisStatus, FailureType, QualityThresholds, SignalLevel, diagnose_case, normalize_trace, skim_case,
+)
 
 
 class SkimImportTests(unittest.TestCase):
@@ -62,3 +64,48 @@ class SkimImportTests(unittest.TestCase):
         }))
         self.assertEqual(report.failure_type, FailureType.PREMATURE_STOP)
         self.assertEqual(report.critical_step, 0)
+
+    def test_missed_document_and_unread_document_have_different_flags(self):
+        for hits, expected, critical in (
+            (["other"], FailureType.RETRIEVAL_FAILURE, None),
+            (["support"], FailureType.PREMATURE_STOP, 1),
+        ):
+            with self.subTest(hits=hits):
+                case = skim_case({
+                    "question": "Who directed it?", "final_answer": "Unknown", "stopped": "answer",
+                    "answer_em": 0, "gold_ids": ["support"],
+                    "trajectory": [
+                        {"action": "bm25_search", "observation": "Listing", "hit_ids": hits},
+                        {"action": "answer", "observation": "(episode ended)"},
+                    ],
+                })
+                report = diagnose_case(case)
+                self.assertEqual(report.failure_type, expected)
+                self.assertEqual(report.critical_step, critical)
+                self.assertTrue(report.hypotheses)
+                self.assertIn(["reference_document_ids"], [ref.path for ref in report.evidence_refs])
+
+    def test_low_score_without_references_has_unknown_cause(self):
+        case = skim_case({
+            "question": "Who directed it?", "final_answer": "Unknown", "stopped": "answer",
+            "answer_f1": 0.5, "trajectory": [{"action": "answer"}],
+        })
+        report = diagnose_case(case)
+        self.assertEqual(report.status, DiagnosisStatus.FAILURE_FOUND)
+        self.assertEqual(report.failure_type, FailureType.UNKNOWN)
+        self.assertEqual(report.hypotheses, [])
+        report = diagnose_case(case, quality_thresholds=QualityThresholds(answer_f1=0.4))
+        self.assertEqual(report.status, DiagnosisStatus.NO_FAILURE_DETECTED)
+
+    def test_final_context_metric_distinguishes_loss_from_omission(self):
+        case = {
+            "question": "Who directed it?", "answer": "Unknown", "status": "ok",
+            "trajectory": [],
+            "metrics": {"retrieval_fact_recall": 1, "fact_recall": 0,
+                        "final_context_fact_recall": 0.5},
+        }
+        self.assertEqual(diagnose_case(case).failure_type, FailureType.CONTEXT_LOSS)
+        case["metrics"]["final_context_fact_recall"] = 1
+        self.assertEqual(diagnose_case(case).failure_type, FailureType.INCOMPLETE_ANSWER)
+        del case["metrics"]["final_context_fact_recall"]
+        self.assertEqual(diagnose_case(case).failure_type, FailureType.UNKNOWN)

@@ -7,12 +7,14 @@ import math
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .aggregator import summarize
+from .hypotheses import hypotheses_for
 from .models import (
     Confidence, DiagnosisBatchResult, DiagnosisReport, DiagnosisStatus,
     DiagnosticSignal, EvidenceRef, FailureType, SignalLevel, SuggestedScope,
     TraceEvent, TraceEventType,
 )
 from .normalizer import normalize_trace
+from .quality import QualityThresholds, quality_signals
 from .rules import check_rules
 
 
@@ -35,7 +37,7 @@ def _report(
         last_step = max((event.step_index for event in events
                          if event.step_index is not None), default=None)
         tool_errors = [signal for signal in failures if signal.rule_id == "tool_error"]
-        if primary.rule_id == "budget_stop":
+        if primary.rule_id in ("budget_stop", "unvisited_reference_documents"):
             critical_step = primary.step_index
         elif (row.get("status") == "error" and len(tool_errors) == 1
                 and primary.rule_id == "tool_error"
@@ -57,13 +59,8 @@ def _report(
         category, confidence = FailureType.UNKNOWN, Confidence.LOW
         rationale = "No failure established; completion status or final-answer data is insufficient."
 
-    # Review hints, not automatic optimization decisions.
-    scope = {
-        FailureType.OUTPUT_FORMAT_ERROR: SuggestedScope.PROMPT,
-        FailureType.INVALID_TOOL_CALL: SuggestedScope.PROMPT,
-        FailureType.PREMATURE_STOP: SuggestedScope.STRUCTURAL,
-        FailureType.TOOL_EXECUTION_FAILURE: SuggestedScope.STRUCTURAL,
-    }.get(category, SuggestedScope.UNKNOWN)
+    hypotheses = hypotheses_for(primary) if primary is not None else []
+    scope = hypotheses[0].scope if hypotheses else SuggestedScope.UNKNOWN
     refs: list[EvidenceRef] = []
     for signal in signals:
         for ref in signal.evidence_refs:
@@ -73,7 +70,7 @@ def _report(
         case_id=row.get("case_id", row.get("id")), run_id=run_id, version_id=version_id,
         status=status, failure_type=category, critical_step=critical_step,
         evidence_refs=refs, rationale=rationale, confidence=confidence,
-        suggested_scope=scope, signals=signals,
+        suggested_scope=scope, signals=signals, hypotheses=hypotheses,
     )
 
 
@@ -85,6 +82,7 @@ def diagnose(
     version_id: str | None = None,
     normalizer: Callable[[Mapping[str, Any]], Sequence[TraceEvent]] = normalize_trace,
     answer_validator: Callable[[Any], bool] | None = None,
+    quality_thresholds: QualityThresholds = QualityThresholds(),
 ) -> DiagnosisBatchResult:
     """Diagnose runner rows in order without mutating them.
 
@@ -102,6 +100,7 @@ def diagnose(
         try:
             events = list(normalizer(row))
             signals = check_rules(row, events, answer_validator=answer_validator)
+            signals.extend(quality_signals(row, quality_thresholds))
             report = _report(row, events, signals, case_run, case_version)
         except Exception as exc:
             report = DiagnosisReport(
@@ -115,7 +114,10 @@ def diagnose(
     return DiagnosisBatchResult(reports=reports, summary=summarize(reports))
 
 
-def diagnose_case(case: str | Mapping[str, Any]) -> DiagnosisReport:
+def diagnose_case(
+    case: str | Mapping[str, Any], *,
+    quality_thresholds: QualityThresholds = QualityThresholds(),
+) -> DiagnosisReport:
     """Validate one JSON case and report evidence relative to that object."""
     row = json.loads(case) if isinstance(case, str) else case
     if not isinstance(row, Mapping):
@@ -148,4 +150,4 @@ def diagnose_case(case: str | Mapping[str, Any]) -> DiagnosisReport:
     for field in ("run_id", "version_id", "traceback"):
         if row.get(field) is not None and not isinstance(row[field], str):
             raise ValueError(f"{field} must be a string or null")
-    return diagnose([row]).reports[0]
+    return diagnose([row], quality_thresholds=quality_thresholds).reports[0]

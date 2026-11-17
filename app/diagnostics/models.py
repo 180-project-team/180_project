@@ -96,6 +96,13 @@ class DiagnosticSignal:
     component_id: str | None = None
 
 
+@dataclass(frozen=True)
+class Hypothesis:
+    hypothesis_id: str
+    scope: SuggestedScope
+    advice: str
+
+
 @dataclass
 class DiagnosisReport:
     """Observed failures and warnings; FAILURE_FOUND need not mean final failure.
@@ -115,6 +122,7 @@ class DiagnosisReport:
     confidence: Confidence
     suggested_scope: SuggestedScope
     signals: list[DiagnosticSignal] = field(default_factory=list)
+    hypotheses: list[Hypothesis] = field(default_factory=list)
 
 
 @dataclass
