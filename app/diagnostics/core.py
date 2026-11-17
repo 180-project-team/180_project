@@ -21,8 +21,10 @@ def _report(
     signals: list[DiagnosticSignal], run_id: str | None, version_id: str | None,
 ) -> DiagnosisReport:
     failures = [signal for signal in signals if signal.level == SignalLevel.FAILURE]
-    primary = next((signal for signal in failures if signal.rule_id == "tool_error"),
-                   failures[0] if failures else None)
+    primary = next(
+        (signal for signal in failures if signal.failure_type != FailureType.UNKNOWN),
+        failures[0] if failures else None,
+    )
     critical_step = None
     if primary is not None:
         status = DiagnosisStatus.FAILURE_FOUND
@@ -33,7 +35,10 @@ def _report(
         last_step = max((event.step_index for event in events
                          if event.step_index is not None), default=None)
         tool_errors = [signal for signal in failures if signal.rule_id == "tool_error"]
-        if (row.get("status") == "error" and len(tool_errors) == 1
+        if primary.rule_id == "budget_stop":
+            critical_step = primary.step_index
+        elif (row.get("status") == "error" and len(tool_errors) == 1
+                and primary.rule_id == "tool_error"
                 and primary.step_index is not None and primary.step_index == last_step
                 and not any(event.step_index == last_step and
                             (event.event_type == TraceEventType.FINAL_ANSWER or
@@ -55,6 +60,8 @@ def _report(
     # Review hints, not automatic optimization decisions.
     scope = {
         FailureType.OUTPUT_FORMAT_ERROR: SuggestedScope.PROMPT,
+        FailureType.INVALID_TOOL_CALL: SuggestedScope.PROMPT,
+        FailureType.PREMATURE_STOP: SuggestedScope.STRUCTURAL,
         FailureType.TOOL_EXECUTION_FAILURE: SuggestedScope.STRUCTURAL,
     }.get(category, SuggestedScope.UNKNOWN)
     refs: list[EvidenceRef] = []

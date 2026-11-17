@@ -2,7 +2,7 @@
 
 import unittest
 
-from app.diagnostics import FailureType, diagnose_case, normalize_trace, skim_case
+from app.diagnostics import DiagnosisStatus, FailureType, SignalLevel, diagnose_case, normalize_trace, skim_case
 
 
 class SkimImportTests(unittest.TestCase):
@@ -31,3 +31,34 @@ class SkimImportTests(unittest.TestCase):
     def test_skipped_rows_are_not_diagnosable(self):
         with self.assertRaisesRegex(ValueError, "Skipped episode"):
             skim_case({"instance_id": "2wiki-2", "skipped": "no_units"})
+
+    def test_invalid_visit_is_not_an_execution_error(self):
+        report = diagnose_case(skim_case({
+            "question": "Who directed it?", "final_answer": "Unknown", "stopped": "answer",
+            "trajectory": [{"action": "visit", "args": {"rank": 9},
+                            "observation": "ERROR: rank 9 out of range (last search had 2 results)."}],
+        }))
+        self.assertEqual(report.failure_type, FailureType.INVALID_TOOL_CALL)
+        self.assertEqual(report.signals[0].component_id, "visit")
+
+    def test_recovered_search_keeps_evidence_and_is_only_a_warning(self):
+        search = {"action": "bm25_search", "args": {"query": "director"},
+                  "query": "director"}
+        report = diagnose_case(skim_case({
+            "question": "Who directed it?", "final_answer": "Someone", "stopped": "answer",
+            "trajectory": [dict(search, observation="ERROR: timed out"),
+                           dict(search, observation="(2 matches)")],
+        }))
+        self.assertEqual(report.status, DiagnosisStatus.NO_FAILURE_DETECTED)
+        recovered = next(signal for signal in report.signals if signal.rule_id == "tool_error")
+        self.assertEqual(recovered.level, SignalLevel.WARNING)
+        self.assertEqual([ref.path for ref in recovered.evidence_refs],
+                         [["trajectory", 0, "observation"], ["trajectory", 1, "observation"]])
+
+    def test_budget_stop_has_an_explicit_failure_category(self):
+        report = diagnose_case(skim_case({
+            "question": "Who directed it?", "final_answer": "", "stopped": "ctx_budget",
+            "trajectory": [{"action": "budget", "observation": "Budget limit reached"}],
+        }))
+        self.assertEqual(report.failure_type, FailureType.PREMATURE_STOP)
+        self.assertEqual(report.critical_step, 0)

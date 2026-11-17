@@ -51,9 +51,9 @@ def normalize_trace(result: Mapping[str, Any]) -> list[TraceEvent]:
                 continue
             action = step.get("action")
             if isinstance(action, str):
-                if action in {"answer", "submit", "stop"}:
+                if action in {"answer", "submit"}:
                     add(path, TraceEventType.FINAL_ANSWER, index, action)
-                elif action in {"none", "budget"}:
+                elif action in {"none", "budget", "stop"}:
                     add(path, TraceEventType.MODEL_RESPONSE, index, action)
                 else:
                     call_id = f"skim-step-{index}"

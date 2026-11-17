@@ -93,6 +93,7 @@ class DiagnosticSignal:
     evidence_refs: list[EvidenceRef]
     rationale: str
     confidence: Confidence
+    component_id: str | None = None
 
 
 @dataclass
