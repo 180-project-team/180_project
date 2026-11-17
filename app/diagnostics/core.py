@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .aggregator import summarize
@@ -61,7 +63,7 @@ def _report(
             if ref not in refs:
                 refs.append(ref)
     return DiagnosisReport(
-        case_id=row.get("id"), run_id=run_id, version_id=version_id,
+        case_id=row.get("case_id", row.get("id")), run_id=run_id, version_id=version_id,
         status=status, failure_type=category, critical_step=critical_step,
         evidence_refs=refs, rationale=rationale, confidence=confidence,
         suggested_scope=scope, signals=signals,
@@ -96,7 +98,7 @@ def diagnose(
             report = _report(row, events, signals, case_run, case_version)
         except Exception as exc:
             report = DiagnosisReport(
-                case_id=row.get("id"), run_id=case_run, version_id=case_version,
+                case_id=row.get("case_id", row.get("id")), run_id=case_run, version_id=case_version,
                 status=DiagnosisStatus.DIAGNOSTIC_ERROR, failure_type=FailureType.UNKNOWN,
                 critical_step=None, evidence_refs=[],
                 rationale=f"Diagnostics failed: {type(exc).__name__}: {exc}",
@@ -104,3 +106,39 @@ def diagnose(
             )
         reports.append(report)
     return DiagnosisBatchResult(reports=reports, summary=summarize(reports))
+
+
+def diagnose_case(case: str | Mapping[str, Any]) -> DiagnosisReport:
+    """Validate one JSON case and report evidence relative to that object."""
+    row = json.loads(case) if isinstance(case, str) else case
+    if not isinstance(row, Mapping):
+        raise ValueError("A diagnostic case must be a JSON object")
+    question = row.get("question")
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("question must be a non-empty string")
+    if "answer" not in row:
+        raise ValueError("answer is required and may be null")
+    if row.get("status") not in ("ok", "error", "unknown"):
+        raise ValueError("status must be ok, error, or unknown")
+    if "trajectory" not in row or (
+        row["trajectory"] is not None and not isinstance(row["trajectory"], list)
+    ):
+        raise ValueError("trajectory must be an array or null")
+    metrics = row.get("metrics")
+    if not isinstance(metrics, Mapping):
+        raise ValueError("metrics must be an object")
+    for name, value in metrics.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("metric names must be non-empty strings")
+        if value is not None and (
+            type(value) not in (int, float)
+            or isinstance(value, float) and not math.isfinite(value)
+        ):
+            raise ValueError(f"Metric {name!r} must be a finite number or null")
+    case_id = row.get("case_id")
+    if case_id is not None and type(case_id) not in (int, str):
+        raise ValueError("case_id must be a string, integer, or null")
+    for field in ("run_id", "version_id", "traceback"):
+        if row.get(field) is not None and not isinstance(row[field], str):
+            raise ValueError(f"{field} must be a string or null")
+    return diagnose([row]).reports[0]

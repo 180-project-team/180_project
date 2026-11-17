@@ -7,11 +7,32 @@ from dataclasses import asdict
 
 from app.diagnostics import (
     Confidence, DiagnosisStatus, FailureType, SuggestedScope, TraceEventType,
-    diagnose, normalize_trace,
+    diagnose, diagnose_case, normalize_trace,
 )
 
 
 class DiagnosticsContractTests(unittest.TestCase):
+    def test_json_case_matches_batch_and_preserves_evidence_paths(self):
+        row = {
+            "case_id": "q1", "question": "When?", "answer": None,
+            "status": "error", "trajectory": None, "metrics": {"answer_em": None},
+            "error": "timeout",
+        }
+        report = diagnose_case(json.dumps(row))
+        self.assertEqual(report, diagnose([row]).reports[0])
+        self.assertEqual(report.case_id, "q1")
+        self.assertIn(["error"], [ref.path for ref in report.evidence_refs])
+
+    def test_json_case_rejects_invalid_metric_values(self):
+        row = {
+            "question": "When?", "answer": "Today",
+            "status": "ok", "trajectory": [], "metrics": {},
+        }
+        for value in (True, "0.5", float("nan"), float("inf")):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    diagnose_case(dict(row, metrics={"answer_f1": value}))
+
     def test_batch_preserves_identity_order_and_does_not_mutate_input(self):
         results = [
             {"id": "a", "status": "ok", "answer": "answer", "trajectory": [{"step": 1}]},

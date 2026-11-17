@@ -1,6 +1,6 @@
 """Public diagnostics interface."""
 
-from .core import diagnose
+from .core import diagnose, diagnose_case
 from .normalizer import normalize_trace
 from .rules import check_rules
 from .models import (
@@ -11,7 +11,7 @@ from .models import (
 )
 
 __all__ = [
-    "diagnose", "Confidence", "DiagnosisBatchResult", "DiagnosisReport",
+    "diagnose", "diagnose_case", "Confidence", "DiagnosisBatchResult", "DiagnosisReport",
     "DiagnosisStatus", "EvidenceRef", "FailureType", "SuggestedScope",
     "normalize_trace", "TraceEvent", "TraceEventType",
     "check_rules", "DiagnosticSignal", "SignalLevel",
