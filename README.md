@@ -25,6 +25,19 @@
 
 ## Как работает система
 
+### Локальное окружение
+
+Из корня репозитория с установленным uv:
+
+```shell
+uv sync --locked
+uv run --locked python -m unittest discover -s tests -v
+uv run --locked python -m examples.diagnose_runner
+```
+
+Для загрузки вопросов напрямую из Hugging Face выполните
+`uv sync --locked --extra huggingface`.
+
 Система запускает агента на подготовленных задачах и сохраняет:
 
 - итоговые ответы;
