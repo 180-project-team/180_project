@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from app.diagnostics import DiagnosisBatchResult, diagnose
@@ -42,19 +43,19 @@ class DemoAgent:
         return {"answer": "42"}
 
 
-def run_example() -> tuple[RunReport, DiagnosisBatchResult]:
+def run_example(*, runs_root: str | Path = "runs") -> tuple[RunReport, DiagnosisBatchResult]:
     questions = [{"id": name, "question": name} for name in (
         "normal", "empty", "runtime_error", "tool_error", "repeated_search",
     )]
-    run_report = AgentRunner(lambda: CallableAdapter(DemoAgent)).run(questions)
-    batch = diagnose(run_report.results, run_id="demo-run", version_id="demo-v1")
+    run_report = AgentRunner(lambda: CallableAdapter(DemoAgent), runs_root=runs_root).run(questions)
+    batch = diagnose(run_report.load_results(), run_id=run_report.run_id, version_id="demo-v1")
     return run_report, batch
 
 
 def main() -> None:
     run_report, batch = run_example()
-    print(json.dumps({"runner": asdict(run_report), "diagnostics": asdict(batch)},
-                     ensure_ascii=False, indent=2))
+    runner = {**asdict(run_report), "run_dir": str(run_report.run_dir)}
+    print(json.dumps({"runner": runner, "diagnostics": asdict(batch)}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

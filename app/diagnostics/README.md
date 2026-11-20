@@ -32,12 +32,15 @@ from app.diagnostics import diagnose
 
 # run_report уже получен вызовом AgentRunner.run(...).
 batch = diagnose(
-    run_report.results,
-    run_id="experiment-run-1",
+    run_report.load_results(),
+    run_id=run_report.run_id,
     version_id="agent-v1",
 )
 serialized = json.dumps(asdict(batch), ensure_ascii=False)
 ```
+
+Runner сохраняет записи в `results.jsonl` внутри `run_report.run_dir`. Метод
+`load_results()` читает этот файл. Пример использует каталог `runs/`.
 
 Diagnostics получает уже сохранённые результаты. Он не запускает агента,
 не рассчитывает метрики, не изменяет код и не принимает решение об оптимизации.
@@ -81,7 +84,7 @@ diagnose(
 ) -> DiagnosisBatchResult
 ```
 
-- `results` — непосредственно `RunReport.results` или другая последовательность
+- `results` — непосредственно `RunReport.load_results()` или другая последовательность
   совместимых отображений. Для каждой записи создаётся один отчёт в исходном порядке.
 - `id` переносится в `case_id` без преобразования. Допустимы `str`, `int`, `None`;
   отсутствующий идентификатор остаётся `None`. Runner сам преобразует свои ID в строки
@@ -187,7 +190,7 @@ Jev использует OpenRouter Decisions API. Для модели с под
 `EvidenceRef.path` — путь относительно соответствующего исходного результата:
 
 ```python
-value = run_report.results[report_index]
+value = run_report.load_results()[report_index]
 for part in batch.reports[report_index].evidence_refs[0].path:
     value = value[part]
 ```
@@ -260,7 +263,7 @@ for part in batch.reports[report_index].evidence_refs[0].path:
 
 ```python
 batch = diagnose(
-    run_report.results,
+    run_report.load_results(),
     answer_validator=lambda answer: (
         isinstance(answer, list) and all(isinstance(item, str) for item in answer)
     ),
@@ -289,9 +292,9 @@ batch = diagnose(
 
 ## Ограничения интеграции и MVP
 
-- Runner сохраняет данные, доступные к моменту сбоя. В частности, верхнеуровневый
-  `error` в ответе агента обрабатывается до переноса полей ответа в результат:
-  возвращённая вместе с ним траектория может быть недоступна Diagnostics.
+- Если ответ адаптера содержит верхнеуровневый `error`, Runner сохраняет
+  ошибку выполнения. Частичную траекторию и `traceback` из отдельного
+  артефакта можно передать напрямую в `diagnose_case`.
 - Отсутствующая траектория не мешает проверять статус и ответ. Успешный непустой
   ответ без траектории может получить `NO_FAILURE_DETECTED`, но локализация причин
   и семантическая оценка такого ответа недоступны.
