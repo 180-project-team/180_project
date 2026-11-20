@@ -1,6 +1,6 @@
 """Own the lifecycle of an OpenAI-compatible local model server.
 
-The runner NEVER terminates an already-running/unowned server.
+The shared LLM service NEVER terminates an already-running/unowned server.
 """
 
 from __future__ import annotations
@@ -69,14 +69,14 @@ class ManagedModelServer:
             if not is_ready(self.health_url, self.api_key):
                 raise RuntimeError(
                     f"Existing model server is not available at {self.health_url}. "
-                    "Supply --server-command to start one, or start it manually."
+                    "Supply a local command to start one, or start it manually."
                 )
             return
         if is_ready(self.health_url, self.api_key):
             raise RuntimeError(
                 f"A model server is already available at {self.health_url}. "
                 "Refusing to start another process on the same endpoint. "
-                "Omit --model-server-command to connect to it without owning its lifecycle."
+                "Connect without a command to use the existing server without owning it."
             )
         self._log = tempfile.TemporaryFile(mode="w+b")
         options: dict = {}

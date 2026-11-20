@@ -1,4 +1,4 @@
-"""Universal agent runner; MADQA is one optional adapter."""
+"""Universal target-agent runner; independent of evaluators and LLM services."""
 
 from .adapters import AgentAdapter, CallableAdapter, MADQAAdapter, SubprocessJSONLAdapter
 from .core import AgentRunner, RunReport

@@ -46,15 +46,28 @@ class SubprocessJSONLAdapter:
         self.shutdown_timeout = shutdown_timeout
         self.process: subprocess.Popen[str] | None = None
         self._log = None
+        self._log_path: Path | None = None
         self._messages: queue.Queue[str | None] = queue.Queue()
         self._reader: threading.Thread | None = None
         self._next_id = 0
         self._broken = False
 
+    def set_artifacts_dir(self, directory: str | Path) -> None:
+        """Optional runner hook: persist agent stderr under the run directory."""
+        if self.process is not None:
+            raise RuntimeError("Cannot change artifacts directory while running")
+        path = Path(directory)
+        path.mkdir(parents=True, exist_ok=True)
+        self._log_path = path / "agent.stderr.log"
+
     def start(self) -> None:
         if self.process is not None:
             raise RuntimeError("Adapter already started")
-        self._log = tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
+        self._log = (
+            self._log_path.open("w+", encoding="utf-8")
+            if self._log_path is not None
+            else tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
+        )
         extra: dict[str, Any] = {}
         if os.name == "posix":
             extra["start_new_session"] = True

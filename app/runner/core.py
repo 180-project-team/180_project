@@ -1,128 +1,183 @@
-"""Agent-agnostic batch runner. Evaluation is supplied by the caller."""
+"""Agent-agnostic execution engine. The orchestrator owns the runner.
+
+Every invocation produces a new directory containing questions, responses,
+execution events, a summary, and a space for extra diagnostic artifacts.
+There is deliberately NO dependency on evaluators or LLM services here.
+"""
 
 from __future__ import annotations
 
 import json
+import re
 import time
+import uuid
 from contextlib import ExitStack
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Protocol
+from typing import Any, Callable, Iterable, Mapping
 
 from .adapters.base import AgentAdapter
 
 
-class Evaluator(Protocol):
-    def __call__(self, results: list[dict[str, Any]]) -> Any: ...
-
-
-@dataclass
+@dataclass(frozen=True)
 class RunReport:
-    """Answers and optional *external* evaluator output."""
+    """Location of persisted run artifacts, not an in-memory result payload."""
 
-    results: list[dict[str, Any]]
-    evaluation: Any = None
+    run_id: str
+    run_dir: Path
+    processed_count: int
+    failed_count: int
+    status: str
 
     @property
-    def failed_count(self) -> int:
-        return sum(row["status"] == "error" for row in self.results)
+    def results_path(self) -> Path:
+        return self.run_dir / "results.jsonl"
+
+    @property
+    def questions_path(self) -> Path:
+        return self.run_dir / "questions.jsonl"
+
+    @property
+    def metadata_path(self) -> Path:
+        return self.run_dir / "metadata.json"
+
+    @property
+    def events_path(self) -> Path:
+        return self.run_dir / "events.jsonl"
+
+    def load_results(self) -> list[dict[str, Any]]:
+        """Optional convenience method; evaluators may stream results.jsonl instead."""
+        with self.results_path.open(encoding="utf-8") as file:
+            return [json.loads(line) for line in file if line.strip()]
 
 
 class AgentRunner:
-    """Run N questions with ONE agent lifecycle; always stop resources we own.
+    """Run a batch with one agent process lifecycle.
 
-    `adapter_factory` must return a NEW adapter for each run. This avoids reusing
-    stopped subprocesses and permits comparing agents or prompt variants.
-
-    `model_service` is an optional context manager (e.g. ManagedModelServer).
-    It starts before the adapter and is stopped after the adapter.
-
-    Evaluator receives all normalized rows, including failures. No scoring is
-    performed in this module.
+    The orchestrator creates an AgentRunner and passes questions to run().
+    Each call creates a unique directory under runs_root. The adapter is
+    constructed afresh for each call and stopped even on startup failure.
+    An evaluator can depend on this class; this class never imports one.
     """
 
     def __init__(
         self,
         adapter_factory: Callable[[], AgentAdapter],
         *,
-        model_service: Any = None,
+        runs_root: str | Path = "runs",
     ) -> None:
         if not callable(adapter_factory):
-            raise TypeError("adapter_factory must be callable and create a new adapter")
+            raise TypeError("adapter_factory must be callable")
         self._factory = adapter_factory
-        self._model_service = model_service
+        self.runs_root = Path(runs_root).expanduser().resolve()
 
     def run(
         self,
         questions: Iterable[Mapping[str, Any]],
         *,
-        evaluator: Evaluator | None = None,
-        output_path: str | Path | None = None,
+        run_id: str | None = None,
         continue_on_error: bool = True,
+        metadata: Mapping[str, Any] | None = None,
     ) -> RunReport:
-        rows = list(questions)
-        for i, row in enumerate(rows, 1):
-            if (
-                not isinstance(row, Mapping)
-                or not isinstance(row.get("question"), str)
-                or not row["question"].strip()
-            ):
-                raise ValueError(f"Question #{i} must contain a non-empty 'question' string")
+        batch = [dict(row) if isinstance(row, Mapping) else row for row in questions]
+        for index, row in enumerate(batch, 1):
+            if not isinstance(row, dict) or not isinstance(row.get("question"), str) or not row["question"].strip():
+                raise ValueError(f"Question #{index} must contain a non-empty 'question' string")
 
-        # No expensive startup if no work. Do not overwrite existing output.
-        if not rows:
-            return RunReport([], evaluator([]) if evaluator else None)
+        identifier = run_id or (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid.uuid4().hex[:8])
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", identifier) or identifier in {".", ".."}:
+            raise ValueError("run_id must be a simple filename (letters, numbers, _, -, .)")
 
-        destination = Path(output_path) if output_path is not None else None
-        if destination is not None:
-            destination.parent.mkdir(parents=True, exist_ok=True)
+        self.runs_root.mkdir(parents=True, exist_ok=True)
+        run_dir = self.runs_root / identifier
+        run_dir.mkdir(exist_ok=False)  # Never silently overwrite a previous run.
+        (run_dir / "artifacts").mkdir()
+        questions_file = run_dir / "questions.jsonl"
+        results_file = run_dir / "results.jsonl"
+        events_file = run_dir / "events.jsonl"
+        metadata_file = run_dir / "metadata.json"
 
-        results: list[dict[str, Any]] = []
-        with ExitStack() as resources:
-            if self._model_service is not None:
-                resources.enter_context(self._model_service)
+        def write_json(path: Path, value: Any) -> None:
+            # Atomic summary writes prevent partially written metadata files.
+            temporary = path.with_name(path.name + ".tmp")
+            temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+            temporary.replace(path)
 
-            adapter = self._factory()
-            # Register cleanup BEFORE start: partly initialized adapters can fail.
-            resources.callback(adapter.stop)
-            adapter.start()
+        with questions_file.open("w", encoding="utf-8") as file:
+            for row in batch:
+                file.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
-            sink = resources.enter_context(destination.open("w", encoding="utf-8")) if destination else None
-            for i, row in enumerate(rows, 1):
-                begin = time.monotonic()
-                # Copy input fields: preserves ground truth (MADQA: answer_variants/evidence)
-                # without requiring the runner to understand a specific benchmark.
-                result: dict[str, Any] = dict(row)
-                result["id"] = str(row.get("id") if row.get("id") is not None else i)
-                result["question"] = row["question"]
-                try:
-                    raw = adapter.ask(row["question"])
-                    if isinstance(raw, Mapping):
-                        if "error" in raw:
-                            raise RuntimeError(str(raw["error"]))
-                        # Prevent agent outputs from overriding the task identity/GT.
-                        result.update({k: v for k, v in raw.items() if k not in row and k not in {"id", "question", "status", "duration_ms"}})
-                        if "answer" not in raw:
-                            raise ValueError("Adapter response dictionary must contain 'answer'")
-                        result["answer"] = raw["answer"]
-                    else:
-                        result["answer"] = raw
-                    result["status"] = "ok"
-                except Exception as exc:
-                    result["answer"] = None
-                    result["status"] = "error"
-                    result["error"] = f"{type(exc).__name__}: {exc}"
-                    # A broken adapter may be unusable after an exception, so
-                    # continue_on_error is intended for per-question failures.
-                result["duration_ms"] = round((time.monotonic() - begin) * 1000, 2)
-                results.append(result)
-                if sink is not None:
-                    sink.write(json.dumps(result, ensure_ascii=False) + "\n")
-                    sink.flush()
-                if result["status"] == "error" and not continue_on_error:
-                    break
+        summary: dict[str, Any] = {
+            "run_id": identifier,
+            "status": "running",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": None,
+            "question_count": len(batch),
+            "processed_count": 0,
+            "failed_count": 0,
+            "metadata": dict(metadata) if metadata else {},
+        }
+        write_json(metadata_file, summary)
 
-            # Evaluator runs BEFORE agent shutdown (allows callbacks to inspect it).
-            # A raised evaluator error still triggers resource cleanup via ExitStack.
-            evaluation = evaluator(results) if evaluator else None
-            return RunReport(results, evaluation)
+        def event(file: Any, name: str, **fields: Any) -> None:
+            file.write(json.dumps({"time": datetime.now(timezone.utc).isoformat(), "event": name, **fields}, ensure_ascii=False, default=str) + "\n")
+            file.flush()
+
+        try:
+            with events_file.open("w", encoding="utf-8") as events, results_file.open("w", encoding="utf-8") as sink:
+                event(events, "run_started", question_count=len(batch))
+                if batch:
+                    with ExitStack() as resources:
+                        adapter = self._factory()
+                        resources.callback(adapter.stop)  # Cleanup even if start() fails.
+                        set_artifacts_dir = getattr(adapter, "set_artifacts_dir", None)
+                        if callable(set_artifacts_dir):
+                            set_artifacts_dir(run_dir / "artifacts")
+                        adapter.start()
+                        event(events, "agent_started")
+                        for index, row in enumerate(batch, 1):
+                            begin = time.monotonic()
+                            result: dict[str, Any] = dict(row)
+                            result["id"] = str(row.get("id") if row.get("id") is not None else index)
+                            result["question"] = row["question"]
+                            try:
+                                raw = adapter.ask(row["question"])
+                                if isinstance(raw, Mapping):
+                                    if raw.get("error") is not None:
+                                        raise RuntimeError(str(raw["error"]))
+                                    if "answer" not in raw:
+                                        raise ValueError("Agent response must contain 'answer'")
+                                    # Keep reference answers, question, run metadata intact.
+                                    result.update({k: v for k, v in raw.items() if k not in row and k not in {"id", "question", "status", "duration_ms"}})
+                                    result["answer"] = raw["answer"]
+                                else:
+                                    result["answer"] = raw
+                                result["status"] = "ok"
+                            except Exception as exc:
+                                result["answer"] = None
+                                result["status"] = "error"
+                                result["error"] = f"{type(exc).__name__}: {exc}"
+                                event(events, "question_failed", question_id=result["id"], error=result["error"])
+                            result["duration_ms"] = round((time.monotonic() - begin) * 1000, 2)
+                            sink.write(json.dumps(result, ensure_ascii=False, default=str) + "\n")
+                            sink.flush()
+                            summary["processed_count"] += 1
+                            summary["failed_count"] += result["status"] == "error"
+                            if result["status"] == "error" and not continue_on_error:
+                                break
+                    event(events, "agent_stopped")
+                summary["status"] = "completed_with_errors" if summary["failed_count"] else "completed"
+                event(events, "run_finished", status=summary["status"])
+        except BaseException as exc:
+            summary["status"] = "failed"
+            summary["fatal_error"] = f"{type(exc).__name__}: {exc}"
+            # The run directory remains available for debugging after exceptions.
+            with events_file.open("a", encoding="utf-8") as events:
+                event(events, "run_failed", error=summary["fatal_error"])
+            raise
+        finally:
+            summary["finished_at"] = datetime.now(timezone.utc).isoformat()
+            write_json(metadata_file, summary)
+
+        return RunReport(identifier, run_dir, summary["processed_count"], summary["failed_count"], summary["status"])
