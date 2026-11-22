@@ -1,0 +1,2 @@
+total_questions,successful_questions,failed_questions,fact_recall_mean,fact_recall_count,fact_precision_mean,fact_precision_count,retrieval_fact_recall_mean,retrieval_fact_recall_count,faithfulness_mean,faithfulness_count,duration_ms_mean,duration_ms_count,tool_calls_count_mean,tool_calls_count_count,successful_tool_calls_count_mean,successful_tool_calls_count_count,failed_tool_calls_count_mean,failed_tool_calls_count_count
+3,3,0,1.0,3,1.0,3,1.0,3,1.0,3,2183.5,3,2.0,3,1.6666666666666667,3,0.3333333333333333,3
