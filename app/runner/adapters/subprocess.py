@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, TextIO
 
 
 class SubprocessJSONLAdapter:
@@ -46,28 +46,22 @@ class SubprocessJSONLAdapter:
         self.shutdown_timeout = shutdown_timeout
         self.process: subprocess.Popen[str] | None = None
         self._log = None
-        self._log_path: Path | None = None
+        self._stderr: TextIO | None = None
         self._messages: queue.Queue[str | None] = queue.Queue()
         self._reader: threading.Thread | None = None
         self._next_id = 0
         self._broken = False
 
-    def set_artifacts_dir(self, directory: str | Path) -> None:
-        """Optional runner hook: persist agent stderr under the run directory."""
+    def set_stderr(self, stream: TextIO) -> None:
+        """Redirect subprocess diagnostics to a caller-owned seekable stream."""
         if self.process is not None:
-            raise RuntimeError("Cannot change artifacts directory while running")
-        path = Path(directory)
-        path.mkdir(parents=True, exist_ok=True)
-        self._log_path = path / "agent.stderr.log"
+            raise RuntimeError("Cannot change stderr while running")
+        self._stderr = stream
 
     def start(self) -> None:
         if self.process is not None:
             raise RuntimeError("Adapter already started")
-        self._log = (
-            self._log_path.open("w+", encoding="utf-8")
-            if self._log_path is not None
-            else tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
-        )
+        self._log = self._stderr or tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
         extra: dict[str, Any] = {}
         if os.name == "posix":
             extra["start_new_session"] = True
@@ -192,5 +186,6 @@ class SubprocessJSONLAdapter:
         finally:
             self._reader = None
             if self._log is not None:
-                self._log.close()
+                if self._log is not self._stderr:
+                    self._log.close()
                 self._log = None

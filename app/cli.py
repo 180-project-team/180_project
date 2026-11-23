@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import sys
@@ -19,12 +20,10 @@ def build_parser() -> argparse.ArgumentParser:
     data.add_argument("--dataset", help="Optional Hugging Face dataset ID")
     parser.add_argument("--split", default="dev")
     parser.add_argument("--limit", type=int)
-    parser.add_argument("--runs-root", type=Path, default=Path("runs"), help="Parent directory for run folders")
-    parser.add_argument("--run-id", help="Optional unique run directory name")
+    parser.add_argument("--run-dir", type=Path, default=Path("."), help="Caller-supplied run directory")
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--agent-command", help="Command for JSONL subprocess agent, without shell expansion")
     parser.add_argument("--agent-cwd", type=Path)
-    # MADQA is an optional integration; the runner has no MADQA-specific code.
     parser.add_argument("--agent-dir", type=Path)
     parser.add_argument("--ocr-file", type=Path, default=Path("data/ocr_output.jsonl"))
     parser.add_argument("--model")
@@ -48,8 +47,8 @@ def main(argv: list[str] | None = None) -> int:
             if not args.agent_command:
                 raise ValueError("--agent-command required for --adapter jsonl")
             command = shlex.split(args.agent_command)
-            adapter_factory = lambda: SubprocessJSONLAdapter(
-                command, cwd=args.agent_cwd,
+            adapter_factory = lambda run_dir: SubprocessJSONLAdapter(
+                command, cwd=args.agent_cwd, env={"AGENT_RUN_DIR": str(run_dir.resolve())},
                 startup_timeout=args.agent_startup_timeout,
                 question_timeout=args.question_timeout,
                 shutdown_timeout=args.shutdown_timeout,
@@ -57,7 +56,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if not args.agent_dir or not args.model:
                 raise ValueError("--adapter madqa requires --agent-dir and --model")
-            adapter_factory = lambda: MADQAAdapter(
+            adapter_factory = lambda run_dir: MADQAAdapter(
+                run_dir=run_dir,
                 agent_dir=args.agent_dir,
                 ocr_file=args.ocr_file,
                 model=args.model,
@@ -69,12 +69,12 @@ def main(argv: list[str] | None = None) -> int:
                 question_timeout=args.question_timeout,
                 shutdown_timeout=args.shutdown_timeout,
             )
-        # No LLM startup here: LLMService is owned by an orchestrator, separately.
-        report = AgentRunner(adapter_factory, runs_root=args.runs_root).run(
-            rows, run_id=args.run_id, continue_on_error=not args.fail_fast
-        )
-        print(report.run_dir)
-        return 1 if report.failed_count else 0
+        runner = AgentRunner(adapter_factory)
+        failed = False
+        for row in runner.run(rows, args.run_dir, continue_on_error=not args.fail_fast):
+            print(json.dumps(row, ensure_ascii=False, default=str), flush=True)
+            failed |= row["status"] == "error"
+        return int(failed)
     except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
         print(f"Runner failed: {exc}", file=sys.stderr)
         return 2

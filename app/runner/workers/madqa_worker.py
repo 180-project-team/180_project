@@ -1,7 +1,6 @@
-"""MADQA-specific worker. Executed in a dedicated Python process.
+"""Worker for the JSONL subprocess protocol.
 
 STDOUT is reserved for the JSONL protocol, all regular prints go to STDERR.
-No MADQA dependency is imported into the generic runner process.
 """
 
 from __future__ import annotations
