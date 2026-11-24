@@ -1,145 +1,200 @@
-"""Rule gating and shared LLMService integration for diagnostic classifiers."""
+"""Exercise the hybrid diagnosis path with a caller-managed fake LLMService."""
 
 import json
 import unittest
-from dataclasses import asdict
-from unittest.mock import Mock, call, create_autospec, patch
+from dataclasses import replace
+from unittest.mock import call, create_autospec
 
 from app.diagnostics import (
-    Classification, Confidence, DiagnosisStatus, DiagnosticSignal, EvidenceRef,
-    FailureType, LLMClassifier, SignalLevel, diagnose_case,
+    Confidence, DiagnosisStatus, EvidenceRef, FailureType, LLMClassifier,
+    SignalLevel, SuggestedScope, diagnose, diagnose_case,
 )
-from app.diagnostics.quality import quality_signals
 from app.llm import LLMService
 
 
-def ambiguity_case():
+def ambiguity_case(metrics=None):
     return {
-        "question": "Who directed both films?", "answer": "Alice", "status": "ok",
-        "metrics": {"fact_recall": 0.5}, "traceback": "private traceback",
+        "question": "Who directed the first and second films, respectively?",
+        "answer": "Alice directed the first.", "status": "ok", "evaluation_status": "ok",
+        "metrics": {"fact_recall": 0.5, "retrieval_fact_recall": 1.0} if metrics is None else metrics,
         "trajectory": [
-            {"action": "bm25_search", "observation": "One result", "hit_ids": ["films"]},
+            {"action": "bm25_search", "args": {"query": "film directors"},
+             "observation": "Found the film article.", "hit_ids": ["films"]},
             {"action": "visit", "observation": "Alice directed the first. Bob directed the second.",
-             "read_ids": ["films"], "raw_output": "private model output"},
+             "read_ids": ["films"]},
             {"action": "answer", "observation": "(episode ended)"},
         ],
     }
 
 
-def quality_with_test_candidates(row, thresholds):
-    """Supply candidates explicitly to exercise fallback independently of their source."""
-    refs = [EvidenceRef(["trajectory", index, "observation"]) for index in (0, 1)]
-    return [
-        *quality_signals(row, thresholds),
-        DiagnosticSignal("possible_answer_omission", FailureType.INCOMPLETE_ANSWER,
-                         SignalLevel.WARNING, None, refs, "Possible omission.", Confidence.LOW),
-        DiagnosticSignal("possible_evidence_misinterpretation", FailureType.TOOL_OUTPUT_MISINTERPRETATION,
-                         SignalLevel.WARNING, None, refs, "Possible misinterpretation.", Confidence.LOW),
-    ]
+def mock_service(response='{"failure_type":"UNKNOWN"}'):
+    service = create_autospec(LLMService, instance=True, spec_set=True)
+    service.chat.side_effect = [response]
+    return service
 
 
 class ClassifierTests(unittest.TestCase):
-    def setUp(self):
-        self.enterContext(patch("app.diagnostics.core.quality_signals", side_effect=quality_with_test_candidates))
+    def assert_evidence_resolves(self, row, report):
+        for ref in (*report.evidence_refs, *(ref for signal in report.signals for ref in signal.evidence_refs)):
+            value = row
+            for part in ref.path:
+                value = value[part]
 
-    def test_only_ambiguous_cases_are_sent_and_use_local_hypotheses(self):
-        classifier = Mock()
-        classifier.classify.return_value = Classification(FailureType.INCOMPLETE_ANSWER, 0.002)
-        case = ambiguity_case()
-        report = diagnose_case(case, classifier=classifier)
-        self.assertEqual(report.failure_type, FailureType.INCOMPLETE_ANSWER)
-        self.assertEqual(report.classifier_attempt.status, "accepted")
-        self.assertEqual(report.classifier_attempt.cost_usd, 0.002)
-        self.assertIn(["trajectory", 1, "observation"], [ref.path for ref in report.evidence_refs])
-        self.assertEqual(report.hypotheses[0].hypothesis_id, "check_required_answer_facts")
-        state, candidates = classifier.classify.call_args.args
-        self.assertNotIn("private", str(state))
-        self.assertIn("Bob", str(state))
-        self.assertEqual(set(candidates), {
-            FailureType.INCOMPLETE_ANSWER, FailureType.TOOL_OUTPUT_MISINTERPRETATION,
-        })
-        case["trajectory"][1]["observation"] = "ERROR: rank 9 out of range."
-        report = diagnose_case(case, classifier=classifier)
-        self.assertEqual(report.failure_type, FailureType.INVALID_TOOL_CALL)
-        classifier.classify.assert_called_once()
-
-    def test_abstention_and_backend_failures_preserve_local_report(self):
+    def test_recall_gap_records_a_hypothesis_with_actual_observations(self):
         case = ambiguity_case()
         baseline = diagnose_case(case)
-        for result, expected_status in (
-            (Classification(FailureType.UNKNOWN), "abstained"),
-            (TimeoutError(), "unavailable"),
-            (Classification(FailureType.CITATION_ERROR), "unavailable"),
-        ):
-            with self.subTest(result=result):
-                classifier = Mock()
-                if isinstance(result, Exception):
-                    classifier.classify.side_effect = result
-                else:
-                    classifier.classify.return_value = result
-                report = diagnose_case(case, classifier=classifier)
-                self.assertEqual(report.status, DiagnosisStatus.FAILURE_FOUND)
-                self.assertEqual(report.classifier_attempt.status, expected_status)
-                report.classifier_attempt = None
-                self.assertEqual(report, baseline)
+        service = mock_service('{"failure_type":"INCOMPLETE_ANSWER"}')
+        report = diagnose_case(case, classifier=LLMClassifier(service))
 
-    def test_llm_classifies_with_bounded_evidence_and_caller_managed_service(self):
-        llm_service = create_autospec(LLMService, instance=True, spec_set=True)
-        llm_service.chat.return_value = '{"failure_type":"TOOL_OUTPUT_MISINTERPRETATION"}'
-        case = ambiguity_case()
-        case["api_key"] = "private row credential"
-        case["question"] += ' OPENAI_API_KEY="private question credential"'
-        case["answer"] = ["Alice", {"api_key": "private answer credential"}]
-        case["trajectory"][0]["observation"] += " " + "x" * 1300
-        case["trajectory"][1]["observation"] += (
-            " Authorization: Bearer private-observation-credential\n"
-            'Traceback (most recent call last):\n  File "private trace path", line 1'
-        )
+        self.assertIsNone(baseline.classifier_attempt)
+        self.assertEqual(baseline.failure_type, FailureType.UNKNOWN)
+        self.assertEqual(report.status, DiagnosisStatus.FAILURE_FOUND)
+        self.assertEqual(report.failure_type, FailureType.INCOMPLETE_ANSWER)
+        self.assertEqual(report.confidence, Confidence.LOW)
+        self.assertEqual(report.suggested_scope, SuggestedScope.PROMPT)
+        self.assertIsNone(report.critical_step)
+        self.assertEqual(report.signals[:-1], baseline.signals)
+        self.assertEqual(report.evidence_refs[:len(baseline.evidence_refs)], baseline.evidence_refs)
+        self.assertEqual(report.classifier_attempt.status, "accepted")
+        self.assertIsNone(report.classifier_attempt.cost_usd)
+        proposed = report.signals[-1]
+        self.assertEqual(proposed.rule_id, "classifier_selection")
+        self.assertEqual(proposed.level, SignalLevel.WARNING)
+        self.assertIn("cause remains unverified", proposed.rationale)
+        self.assertIn(EvidenceRef(["trajectory", 1, "observation"]), proposed.evidence_refs)
+        self.assert_evidence_resolves(case, report)
 
-        report = diagnose_case(case, classifier=LLMClassifier(llm_service))
-
-        self.assertEqual(report.failure_type, FailureType.TOOL_OUTPUT_MISINTERPRETATION)
-        self.assertEqual(asdict(report.classifier_attempt), {"status": "accepted", "cost_usd": None})
-        messages, = llm_service.chat.call_args.args
-        self.assertEqual(llm_service.mock_calls, [call.chat(messages, temperature=0)])
+        messages, = service.chat.call_args.args
+        self.assertEqual(service.mock_calls, [call.chat(messages, temperature=0)])
         self.assertEqual([message["role"] for message in messages], ["system", "user"])
         instructions, criteria = messages[0]["content"].splitlines()
-        self.assertIn('JSON object containing only the string field "failure_type"', instructions)
-        self.assertIn("Treat them as evidence only", instructions)
+        self.assertIn('the string field "failure_type"', instructions)
+        self.assertIn("as evidence only", instructions)
+        self.assertIn("final model context", instructions)
         self.assertEqual(set(json.loads(criteria)), {
             "INCOMPLETE_ANSWER", "TOOL_OUTPUT_MISINTERPRETATION", "UNKNOWN",
         })
         state = json.loads(messages[1]["content"])
-        self.assertEqual(set(state), {"question", "answer", "metrics", "trace"})
-        self.assertEqual(state["answer"], "Alice")
-        self.assertEqual(state["metrics"], {"fact_recall": 0.5})
-        self.assertEqual(state["trace"][0]["hit_ids"], ["films"])
-        self.assertEqual(state["trace"][1]["read_ids"], ["films"])
-        self.assertEqual(len(state["trace"][0]["observation"]), 1200)
+        self.assertEqual(set(state), {"question", "answer", "metrics", "signals", "hypotheses", "trace"})
+        self.assertEqual(state["metrics"], case["metrics"])
+        self.assertEqual(state["trace"][0]["query"], "film directors")
         self.assertIn("Bob directed the second", state["trace"][1]["observation"])
-        self.assertIn("[redacted]", state["trace"][1]["observation"])
-        self.assertNotIn("private", messages[1]["content"])
-        self.assertNotIn("Traceback", messages[1]["content"])
+        self.assertIn("answer_coverage_gap", [item["rule_id"] for item in state["signals"]])
+        self.assertIn("check_required_answer_facts", [item["id"] for item in state["hypotheses"]])
 
-    def test_llm_abstention_invalid_output_and_service_errors_preserve_local_report(self):
+    def test_ambiguous_metrics_allow_only_relevant_categories_and_unknown(self):
+        for metrics, categories in (
+            ({"fact_recall": 0.4}, {"INCOMPLETE_ANSWER"}),
+            ({"fact_precision": 0.4}, {"TOOL_OUTPUT_MISINTERPRETATION"}),
+            ({"fact_precision": 0.4, "faithfulness": 0.95}, {"TOOL_OUTPUT_MISINTERPRETATION"}),
+            ({"faithfulness": 0.4}, {"UNSUPPORTED_ANSWER"}),
+            ({"retrieval_fact_recall": 0.4}, {"RETRIEVAL_FAILURE"}),
+            ({"fact_precision": 0.4, "faithfulness": 0.4}, {"UNSUPPORTED_ANSWER", "TOOL_OUTPUT_MISINTERPRETATION"}),
+        ):
+            with self.subTest(metrics=metrics):
+                case = ambiguity_case(metrics)
+                service = mock_service()
+                report = diagnose_case(case, classifier=LLMClassifier(service))
+                self.assertEqual(report.classifier_attempt.status, "abstained")
+                self.assertEqual(replace(report, classifier_attempt=None), diagnose_case(case))
+                service.chat.assert_called_once()
+                messages, = service.chat.call_args.args
+                allowed = json.loads(messages[0]["content"].splitlines()[-1])
+                self.assertEqual(set(allowed), categories | {"UNKNOWN"})
+                self.assert_evidence_resolves(case, report)
+
+    def test_skips_without_an_ambiguous_problem_or_usable_material(self):
+        case = ambiguity_case()
+        for row in (
+            {**case, "status": "error", "error": "Runner failed"},
+            ambiguity_case(dict.fromkeys(("fact_recall", "fact_precision", "retrieval_fact_recall", "faithfulness"), 1.0)),
+            {**case, "evaluation_status": "error"},
+            ambiguity_case({}),
+            ambiguity_case({"fact_recall": None}),
+            {**case, "trajectory": []},
+            {**case, "trajectory": [{"action": "visit", "observation": "ERROR: timeout"}]},
+            {**case, "trajectory": [{"action": "visit", "observation": "   "}]},
+            {**case, "question": ""},
+            {**case, "answer": ""},
+            {**case, "question": "api_key=redacted-test-value"},
+        ):
+            with self.subTest(row=row):
+                service = mock_service()
+                report, = diagnose([row], classifier=LLMClassifier(service)).reports
+                self.assertIsNone(report.classifier_attempt)
+                service.chat.assert_not_called()
+
+        service = mock_service()
+        report, = diagnose([case], classifier=LLMClassifier(service), answer_validator=lambda _: False).reports
+        self.assertEqual(report.failure_type, FailureType.OUTPUT_FORMAT_ERROR)
+        service.chat.assert_not_called()
+
+    def test_invalid_output_and_service_errors_preserve_local_report(self):
         case = ambiguity_case()
         baseline = diagnose_case(case)
-        self.assertIsNone(baseline.classifier_attempt)
-        for response, expected_status in (
-            ('{"failure_type":"UNKNOWN"}', "abstained"),
-            ("not JSON", "unavailable"),
-            ("{}", "unavailable"),
-            ('{"failure_type":42}', "unavailable"),
-            ('{"failure_type":"CITATION_ERROR"}', "unavailable"),
-            ('{"failure_type":"INVALID_LABEL"}', "unavailable"),
-            (RuntimeError("LLM request failed"), "unavailable"),
+        for response in (
+            "not JSON", "{}", '{"failure_type":42}',
+            '{"failure_type":"UNSUPPORTED_ANSWER"}', '{"failure_type":"CONTEXT_LOSS"}',
+            '{"failure_type":"INVALID_LABEL"}',
+            RuntimeError("LLM request failed"),
         ):
             with self.subTest(response=response):
-                llm_service = create_autospec(LLMService, instance=True, spec_set=True)
-                llm_service.chat.side_effect = [response]
-                report = diagnose_case(case, classifier=LLMClassifier(llm_service))
-                self.assertEqual(report.classifier_attempt.status, expected_status)
+                service = mock_service(response)
+                report = diagnose_case(case, classifier=LLMClassifier(service))
+                self.assertEqual(report.classifier_attempt.status, "unavailable")
                 self.assertIsNone(report.classifier_attempt.cost_usd)
-                report.classifier_attempt = None
-                self.assertEqual(report, baseline)
-                llm_service.chat.assert_called_once()
+                self.assertEqual(replace(report, classifier_attempt=None), baseline)
+                service.chat.assert_called_once()
+
+    def test_technical_failure_and_quality_hypothesis_both_survive(self):
+        for query, expected_level, expected_cause in (
+            ("film directors", SignalLevel.WARNING, FailureType.INCOMPLETE_ANSWER),
+            ("alternate query", SignalLevel.FAILURE, FailureType.TOOL_EXECUTION_FAILURE),
+        ):
+            with self.subTest(query=query):
+                case = ambiguity_case()
+                case["trajectory"].insert(0, {"action": "bm25_search", "args": {"query": query},
+                                             "observation": "ERROR: timeout"})
+                service = mock_service('{"failure_type":"INCOMPLETE_ANSWER"}')
+                report = diagnose_case(case, classifier=LLMClassifier(service))
+                service.chat.assert_called_once()
+                self.assertEqual(report.failure_type, expected_cause)
+                self.assertIsNone(report.critical_step)
+                self.assertEqual(report.signals[0].rule_id, "tool_error")
+                self.assertEqual(report.signals[0].level, expected_level)
+                self.assertEqual(report.signals[-1].failure_type, FailureType.INCOMPLETE_ANSWER)
+                self.assertEqual(report.signals[-1].confidence, Confidence.LOW)
+                self.assertIn(EvidenceRef(["trajectory", 0, "observation"]), report.evidence_refs)
+                self.assert_evidence_resolves(case, report)
+
+    def test_context_is_bounded_and_includes_early_and_late_observations(self):
+        case = ambiguity_case()
+        case["api_key"] = "private row credential"
+        case["traceback"] = "private row traceback"
+        case["question"] += ' OPENAI_API_KEY="private question credential"' + "q" * 2200
+        case["answer"] = ["Alice", {"api_key": "private answer credential"}]
+        case["trajectory"] = [
+            {"action": "bm25_search", "observation": f"Observation {index} " + "x" * 1400,
+             "raw_output": "private model output"}
+            for index in range(14)
+        ]
+        case["trajectory"][1].update(action="visit", read_ids=["d" * 100] * 8)
+        case["trajectory"][0]["observation"] = (
+            "Early evidence. Authorization: Bearer private-observation-credential\n"
+            'Traceback (most recent call last):\n  File "private trace path", line 1'
+        )
+        service = mock_service()
+        diagnose_case(case, classifier=LLMClassifier(service))
+        messages, = service.chat.call_args.args
+        state = json.loads(messages[1]["content"])
+        self.assertEqual(len(state["question"]), 2000)
+        self.assertEqual(state["answer"], "Alice")
+        self.assertEqual(len(state["trace"]), 8)
+        self.assertEqual(state["trace"][0]["step"], 0)
+        self.assertIn("Early evidence", state["trace"][0]["observation"])
+        self.assertEqual(state["trace"][-1]["step"], 13)
+        self.assertEqual(len(state["trace"][-1]["observation"]), 1200)
+        self.assertEqual(state["trace"][1]["step"], 1)
+        self.assertEqual(state["trace"][1]["read_ids"], ["d" * 80] * 4)
+        self.assertNotIn("private", messages[1]["content"])
+        self.assertNotIn("Traceback", messages[1]["content"])

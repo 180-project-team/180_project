@@ -1,7 +1,6 @@
 """Integration tests using Runner rows with Skim Search trajectories."""
 
 import unittest
-from unittest.mock import Mock
 
 from app.diagnostics import (
     DiagnosisStatus, EvidenceRef, FailureType, QualityThresholds, SignalLevel,
@@ -83,7 +82,7 @@ class SkimTrajectoryTests(unittest.TestCase):
                                  ["check_required_answer_facts"])
                 self.assertEqual(report.evidence_refs, [EvidenceRef(["metrics", "fact_recall"])])
 
-    def test_matching_read_ids_do_not_establish_context_coverage_or_trigger_fallback(self):
+    def test_matching_read_ids_do_not_establish_context_coverage(self):
         case = {
             "question": "Who directed both films?", "answer": "Alice", "status": "ok",
             "metrics": {"fact_recall": 0.5, "retrieval_fact_recall": 0.5},
@@ -94,15 +93,13 @@ class SkimTrajectoryTests(unittest.TestCase):
                 {"action": "answer", "observation": "(episode ended)"},
             ],
         }
-        classifier = Mock()
-        report = diagnose_case(case, classifier=classifier)
+        report = diagnose_case(case)
         self.assertEqual(report.failure_type, FailureType.UNKNOWN)
         self.assertEqual([signal.rule_id for signal in report.signals],
                          ["low_quality_metrics", "possible_retrieval_failure", "low_fact_recall"])
         self.assertEqual([hypothesis.hypothesis_id for hypothesis in report.hypotheses],
                          ["inspect_supporting_document_recall", "check_required_answer_facts"])
         self.assertIsNone(report.classifier_attempt)
-        classifier.classify.assert_not_called()
 
     def test_partial_trace_keeps_document_data_and_local_evidence_resolvable(self):
         row = {

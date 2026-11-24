@@ -62,7 +62,7 @@ _QUALITY_HYPOTHESES = {
 
 
 def hypotheses_for(signal: DiagnosticSignal) -> list[Hypothesis]:
-    if signal.level == SignalLevel.WARNING:
+    if signal.level == SignalLevel.WARNING and signal.rule_id != "classifier_selection":
         return list(_QUALITY_HYPOTHESES.get(signal.rule_id, ()))
     if signal.failure_type == FailureType.PREMATURE_STOP and signal.rule_id == "budget_stop":
         return [Hypothesis(

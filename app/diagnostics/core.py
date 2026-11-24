@@ -20,40 +20,62 @@ from .quality import QUALITY_METRICS, QualityThresholds, is_quality_score, quali
 from .rules import check_rules
 
 
+_QUALITY_CANDIDATES = {
+    "low_fact_recall": (FailureType.INCOMPLETE_ANSWER,),
+    "possible_retrieval_failure": (FailureType.RETRIEVAL_FAILURE,),
+    "answer_coverage_gap": (FailureType.INCOMPLETE_ANSWER, FailureType.TOOL_OUTPUT_MISINTERPRETATION),
+    "low_faithfulness": (FailureType.UNSUPPORTED_ANSWER,),
+    "low_fact_precision": (FailureType.TOOL_OUTPUT_MISINTERPRETATION,),
+    "supported_precision_gap": (FailureType.TOOL_OUTPUT_MISINTERPRETATION,),
+    "unsupported_precision_gap": (FailureType.UNSUPPORTED_ANSWER, FailureType.TOOL_OUTPUT_MISINTERPRETATION),
+}
+
+
 def _classify_ambiguous_case(
-    row: Mapping[str, Any], signals: list[DiagnosticSignal], classifier: FailureClassifier,
+    row: Mapping[str, Any], events: Sequence[TraceEvent], signals: list[DiagnosticSignal],
+    classifier: FailureClassifier,
 ) -> ClassifierAttempt | None:
-    if not any(signal.rule_id == "low_quality_metrics" for signal in signals):
+    quality = [signal for signal in signals if signal.rule_id == "low_quality_metrics"]
+    if not quality:
         return None
-    if any(signal.level == SignalLevel.FAILURE and signal.rule_id != "low_quality_metrics"
+    if any(signal.level == SignalLevel.FAILURE and signal.failure_type == FailureType.OUTPUT_FORMAT_ERROR
            for signal in signals):
         return None
-    candidates = {
-        signal.failure_type: signal for signal in signals
-        if signal.rule_id in (
-            "possible_answer_omission", "possible_evidence_misinterpretation",
-            "possible_retrieval_failure",
-        )
-    }
-    if len(candidates) < 2:
+
+    candidates: dict[FailureType, list[EvidenceRef]] = {}
+    candidate_signals = [signal for signal in signals if signal.rule_id in _QUALITY_CANDIDATES]
+    for signal in candidate_signals:
+        for category in _QUALITY_CANDIDATES[signal.rule_id]:
+            candidates.setdefault(category, []).extend(signal.evidence_refs)
+    if not candidates:
         return None
+
     try:
-        decision = classifier.classify(classifier_state(row, list(candidates.values())),
-                                       tuple(candidates))
+        other_signals = [signal for signal in signals if signal not in quality and signal not in candidate_signals]
+        state = classifier_state(row, events, [*quality, *candidate_signals, *other_signals])
+        observation_refs = [EvidenceRef(["trajectory", step["step"], "observation"])
+                            for step in state["trace"] if not step["error"]]
+        if not observation_refs or any(state[name].strip() in ("", "[redacted]") for name in ("question", "answer")):
+            return None
+        decision = classifier.classify(state, (*candidates, FailureType.UNKNOWN))
+        category = decision.failure_type
+        if not isinstance(category, FailureType):
+            return ClassifierAttempt("unavailable")
         attempt = ClassifierAttempt("abstained", decision.cost_usd)
-        if decision.failure_type == FailureType.UNKNOWN:
+        if category == FailureType.UNKNOWN:
             return attempt
-        if decision.failure_type not in candidates:
+        if category not in candidates:
             return replace(attempt, status="unavailable")
-        selected = candidates[decision.failure_type]
     except Exception:
         # Provider/programmatic backend failures must not erase local evidence.
         return ClassifierAttempt("unavailable")
-    signals.append(replace(
-        selected, rule_id="classifier_selection", level=SignalLevel.FAILURE,
-        rationale="The classifier selected this hypothesis using the available case evidence. "
-                  + selected.rationale,
-        confidence=Confidence.MEDIUM,
+
+    refs = dict.fromkeys(tuple(ref.path) for ref in (*candidates[category], *observation_refs))
+    signals.append(DiagnosticSignal(
+        "classifier_selection", category, SignalLevel.WARNING, None,
+        [EvidenceRef(list(path)) for path in refs],
+        "The classifier proposed this explanation from the scores and sampled tool observations. "
+        "The cause remains unverified.", Confidence.LOW,
     ))
     return replace(attempt, status="accepted")
 
@@ -68,6 +90,8 @@ def _report(
         (signal for signal in failures if signal.failure_type != FailureType.UNKNOWN),
         failures[0] if failures else None,
     )
+    if primary is not None and primary.rule_id == "low_quality_metrics":
+        primary = next((signal for signal in signals if signal.rule_id == "classifier_selection"), primary)
     critical_step = None
     if primary is not None:
         status = DiagnosisStatus.FAILURE_FOUND
@@ -148,7 +172,7 @@ def diagnose(
             events = list(normalizer(row))
             signals = check_rules(row, events, answer_validator=answer_validator)
             signals.extend(quality_signals(row, quality_thresholds))
-            attempt = (_classify_ambiguous_case(row, signals, classifier)
+            attempt = (_classify_ambiguous_case(row, events, signals, classifier)
                        if classifier is not None else None)
             report = _report(row, events, signals, case_run, case_version)
             report.classifier_attempt = attempt

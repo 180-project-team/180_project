@@ -116,7 +116,7 @@ class QualityDiagnosticsTests(unittest.TestCase):
         self.assertEqual(report.evidence_refs, [EvidenceRef(["trajectory", 0, "observation"])])
         self.assertIsNone(report.critical_step)
 
-    def test_new_quality_hypotheses_do_not_change_classifier_gating(self):
+    def test_quality_hypotheses_without_tool_observations_do_not_trigger_classifier(self):
         classifier = Mock()
         report = diagnose_case({
             "question": "Where and when?", "answer": "Paris", "status": "ok", "trajectory": [],
