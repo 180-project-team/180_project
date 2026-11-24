@@ -34,11 +34,8 @@ def skim_case(row: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "trajectory": trajectory,
         "metrics": metrics,
-        "trace_format": "skim_search",
     }
     for name in ("stopped", "run_id", "version_id", "error", "traceback"):
         if name in row:
             case[name] = row[name]
-    if "gold_ids" in row:
-        case["reference_document_ids"] = row["gold_ids"]
     return case

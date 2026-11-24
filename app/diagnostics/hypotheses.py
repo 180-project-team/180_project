@@ -40,15 +40,10 @@ _CATALOG = {
 
 
 def hypotheses_for(signal: DiagnosticSignal) -> list[Hypothesis]:
-    if signal.failure_type == FailureType.PREMATURE_STOP:
-        if signal.rule_id == "budget_stop":
-            return [Hypothesis(
-                "review_execution_budget", SuggestedScope.STRUCTURAL,
-                "Review the budget and the actions that consumed it before increasing the limit.",
-            )]
+    if signal.failure_type == FailureType.PREMATURE_STOP and signal.rule_id == "budget_stop":
         return [Hypothesis(
-            "require_evidence_before_answer", SuggestedScope.STRUCTURAL,
-            "Check whether the agent should open the retrieved supporting documents before answering.",
+            "review_execution_budget", SuggestedScope.STRUCTURAL,
+            "Review the budget and the actions that consumed it before increasing the limit.",
         )]
     hypothesis = _CATALOG.get(signal.failure_type)
     return [hypothesis] if hypothesis else []

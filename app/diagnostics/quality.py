@@ -27,80 +27,6 @@ def _score(metrics: Mapping[str, Any], name: str) -> float | None:
     return value if type(value) in (int, float) and 0 <= value <= 1 else None
 
 
-def _document_ids(value: Any) -> set[str] | None:
-    if isinstance(value, list) and all(isinstance(item, str) and item for item in value):
-        return set(value)
-    return None
-
-
-def _skim_document_signals(
-    row: Mapping[str, Any], refs: list[EvidenceRef],
-) -> list[DiagnosticSignal]:
-    expected = _document_ids(row.get("reference_document_ids"))
-    steps = row.get("trajectory")
-    if not expected or not isinstance(steps, list) or not steps:
-        return []
-    if not all(isinstance(step, Mapping) and step.get("action") in (
-        "bm25_search", "visit", "none", "budget", "stop", "submit", "answer",
-    ) for step in steps):
-        return []
-    if steps[-1]["action"] not in ("answer", "submit", "stop"):
-        return []
-
-    found: set[str] = set()
-    read: set[str] = set()
-    search_refs = []
-    read_refs = []
-    for index, step in enumerate(steps):
-        action = step["action"]
-        if action not in ("bm25_search", "visit"):
-            continue
-        field = "hit_ids" if action == "bm25_search" else "read_ids"
-        document_ids = _document_ids(step.get(field))
-        observation = step.get("observation")
-        if document_ids is None or not isinstance(observation, str) or not observation:
-            return []
-        if observation.startswith("ERROR"):
-            continue
-        path = EvidenceRef(["trajectory", index, field])
-        if action == "bm25_search":
-            found.update(document_ids)
-            search_refs.append(path)
-        else:
-            read.update(document_ids)
-            read_refs.append(path)
-
-    if not search_refs:
-        return []
-    evidence = refs + [EvidenceRef(["reference_document_ids"])] + search_refs + read_refs
-    if expected - found - read:
-        return [DiagnosticSignal(
-            "missing_reference_documents", FailureType.RETRIEVAL_FAILURE, SignalLevel.FAILURE,
-            None, evidence, "Completed searches did not surface all reference documents.",
-            Confidence.HIGH, "bm25_search",
-        )]
-    if expected - read and steps[-1]["action"] in ("answer", "submit"):
-        final = len(steps) - 1
-        return [DiagnosticSignal(
-            "unvisited_reference_documents", FailureType.PREMATURE_STOP, SignalLevel.FAILURE,
-            final, evidence + [EvidenceRef(["trajectory", final, "action"])],
-            "The agent answered before opening all retrieved reference documents.",
-            Confidence.MEDIUM, "visit",
-        )]
-    if expected <= read:
-        return [
-            DiagnosticSignal(rule, category, SignalLevel.WARNING, None, evidence, rationale,
-                             Confidence.LOW)
-            for rule, category, rationale in (
-                ("possible_answer_omission", FailureType.INCOMPLETE_ANSWER,
-                 "The agent read the reference documents but its answer scored below threshold."),
-                ("possible_evidence_misinterpretation", FailureType.TOOL_OUTPUT_MISINTERPRETATION,
-                 "The answer may misinterpret information in the documents read."),
-            )
-        ]
-    return []
-
-
 def quality_signals(
     row: Mapping[str, Any], thresholds: QualityThresholds,
 ) -> list[DiagnosticSignal]:
@@ -151,18 +77,16 @@ def quality_signals(
             Confidence.MEDIUM,
         )]
 
-    skim = _skim_document_signals(row, refs) if row.get("trace_format") == "skim_search" else []
-    if skim and skim[0].level == SignalLevel.FAILURE:
-        return skim
+    signals = [DiagnosticSignal(
+        "low_quality_metrics", FailureType.UNKNOWN, SignalLevel.FAILURE, None, refs,
+        "One or more case metrics are below threshold; attribution requires more evidence.",
+        Confidence.HIGH,
+    )]
     if retrieval_recall is not None and retrieval_recall < thresholds.retrieval_fact_recall:
-        skim.append(DiagnosticSignal(
+        signals.append(DiagnosticSignal(
             "possible_retrieval_failure", FailureType.RETRIEVAL_FAILURE, SignalLevel.WARNING,
             None, [EvidenceRef(["metrics", "retrieval_fact_recall"])],
             "The retrieval metric is low; the trace does not establish a search failure.",
             Confidence.LOW,
         ))
-    return [DiagnosticSignal(
-        "low_quality_metrics", FailureType.UNKNOWN, SignalLevel.FAILURE, None, refs,
-        "One or more case metrics are below threshold; attribution requires more evidence.",
-        Confidence.HIGH,
-    ), *skim]
+    return signals

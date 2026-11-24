@@ -77,7 +77,7 @@ def _report(
         last_step = max((event.step_index for event in events
                          if event.step_index is not None), default=None)
         tool_errors = [signal for signal in failures if signal.rule_id == "tool_error"]
-        if primary.rule_id in ("budget_stop", "unvisited_reference_documents"):
+        if primary.rule_id == "budget_stop":
             critical_step = primary.step_index
         elif (row.get("status") == "error" and len(tool_errors) == 1
                 and primary.rule_id == "tool_error"

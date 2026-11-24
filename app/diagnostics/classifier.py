@@ -119,7 +119,6 @@ def classifier_state(
                 "faithfulness", "final_context_fact_recall",
             ) if _is_unit_score(metrics.get(name))
         },
-        "reference_document_ids": _ids(row.get("reference_document_ids")),
         "trace": excerpts,
     }
 
