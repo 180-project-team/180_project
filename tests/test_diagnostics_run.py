@@ -85,8 +85,65 @@ class DiagnoseRunTests(unittest.TestCase):
         messages, = service.chat.call_args.args
         self.assertEqual(service.mock_calls, [call.chat(messages, temperature=0)])
         self.assertIn("Боб снял второй", messages[1]["content"])
-        self.assertEqual(self.reports(), [asdict(report)])
+        record, = self.reports()
+        self.assertEqual(record, asdict(report))
+        self.assertEqual(set(record), {
+            "case_id", "run_id", "version_id", "status", "failure_type", "critical_step",
+            "evidence_refs", "rationale", "confidence", "suggested_scope", "signals",
+            "hypotheses", "classifier_attempt",
+        })
+        self.assertEqual(record["status"], "FAILURE_FOUND")
+        self.assertEqual(record["failure_type"], "INCOMPLETE_ANSWER")
+        self.assertEqual(record["confidence"], "low")
+        self.assertEqual(record["suggested_scope"], "PROMPT")
+        self.assertEqual(record["classifier_attempt"], {"status": "accepted", "cost_usd": None})
+        self.assertEqual(record["evidence_refs"], [
+            {"path": ["metrics", "fact_recall"]},
+            {"path": ["metrics", "retrieval_fact_recall"]},
+            {"path": ["trajectory", 0, "observation"]},
+        ])
+        self.assertEqual([item["scope"] for item in record["hypotheses"]], ["PROMPT", "PROMPT", "STRUCTURAL"])
+        self.assertEqual(record["hypotheses"][0]["hypothesis_id"], "check_required_answer_facts")
+        for hypothesis in record["hypotheses"]:
+            self.assertEqual(set(hypothesis), {"hypothesis_id", "scope", "advice"})
+            self.assertTrue(hypothesis["advice"].strip())
+        self.assertEqual(record["signals"][-1]["rule_id"], "classifier_selection")
+        self.assertIsNone(record["signals"][-1]["component_id"])
+        self.assertIsNone(record["critical_step"])
         self.assertEqual(self.summary(), asdict(batch.summary))
+
+    def test_serializes_secondary_prompt_hypotheses_and_unknown_scope(self):
+        runner = self.root / "runner.jsonl"
+        evaluator = self.root / "evaluator.jsonl"
+        case = {"question": "Who directed both films?", "answer": "Alice", "status": "ok"}
+        self.write_rows(runner, [
+            {**case, "id": "mixed", "trajectory": [
+                {"action": "bm25_search", "observation": "ERROR: Timeout"},
+                {"action": "visit", "observation": "Alice directed the first film. Bob directed the second."},
+            ]},
+            {**case, "id": "uncertain", "trajectory": [{"action": "answer"}]},
+        ])
+        self.write_rows(evaluator, [
+            {"id": case_id, "status": "ok", "fact_recall": 0.5, "retrieval_fact_recall": 1.0}
+            for case_id in ("mixed", "uncertain")
+        ])
+        service = create_autospec(LLMService, instance=True, spec_set=True)
+        service.chat.return_value = '{"failure_type":"INCOMPLETE_ANSWER"}'
+
+        batch = self.run_diagnostics(run_results_path=runner, evaluation_results_path=evaluator, llm_service=service)
+
+        mixed, uncertain = self.reports()
+        self.assertEqual([mixed, uncertain], [asdict(report) for report in batch.reports])
+        self.assertEqual((mixed["failure_type"], mixed["suggested_scope"]), ("TOOL_EXECUTION_FAILURE", "STRUCTURAL"))
+        self.assertEqual(mixed["signals"][0]["component_id"], "bm25_search")
+        self.assertEqual(mixed["signals"][0]["evidence_refs"], [{"path": ["trajectory", 0, "observation"]}])
+        self.assertEqual(mixed["signals"][-1]["failure_type"], "INCOMPLETE_ANSWER")
+        self.assertIsNone(mixed["signals"][-1]["component_id"])
+        self.assertTrue(any(item["scope"] == "PROMPT" for item in mixed["hypotheses"]))
+        self.assertEqual((uncertain["failure_type"], uncertain["suggested_scope"]), ("UNKNOWN", "UNKNOWN"))
+        for field in ("run_id", "version_id", "critical_step", "classifier_attempt"):
+            self.assertIsNone(uncertain[field])
+        service.chat.assert_called_once()
 
     def test_repeat_replaces_reports_and_preserves_summary_patterns(self):
         runner = self.root / "runner.jsonl"
