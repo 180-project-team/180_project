@@ -7,7 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from app.diagnostics import (
-    Confidence, DiagnosisStatus, FailureType, SuggestedScope, TraceEventType,
+    DiagnosisStatus, FailureType, SuggestedScope, TraceEventType,
     diagnose, diagnose_case, normalize_trace,
 )
 

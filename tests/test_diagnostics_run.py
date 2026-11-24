@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import call, create_autospec, patch
 
-from app.diagnostics import DiagnosisStatus, FailureType, QualityThresholds, diagnose_run
+from app.diagnostics import FailureType, QualityThresholds, diagnose_run
 from app.llm import LLMService
 
 
