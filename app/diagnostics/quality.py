@@ -1,4 +1,4 @@
-"""Use case metrics and trace evidence to distinguish quality failure modes."""
+"""Interpret Evaluator scores as observations about answer and retrieval quality."""
 
 from __future__ import annotations
 
@@ -8,85 +8,112 @@ from typing import Any, Mapping
 from .models import Confidence, DiagnosticSignal, EvidenceRef, FailureType, SignalLevel
 
 
+QUALITY_METRICS = ("fact_recall", "fact_precision", "retrieval_fact_recall", "faithfulness")
+
+
+def is_quality_score(value: Any) -> bool:
+    return type(value) in (int, float) and 0 <= value <= 1
+
+
 @dataclass(frozen=True)
 class QualityThresholds:
-    answer_f1: float = 0.8
+    """Heuristic lower bounds for the four Evaluator quality scores."""
+
     fact_recall: float = 0.8
+    fact_precision: float = 0.8
     retrieval_fact_recall: float = 0.8
     faithfulness: float = 0.8
 
     def __post_init__(self) -> None:
-        for value in (self.answer_f1, self.fact_recall,
-                      self.retrieval_fact_recall, self.faithfulness):
-            if type(value) not in (int, float) or not 0 <= value <= 1:
-                raise ValueError("Quality thresholds must be numbers in [0, 1]")
+        for name in QUALITY_METRICS:
+            if not is_quality_score(getattr(self, name)):
+                raise ValueError(f"Quality threshold {name!r} must be a number in [0, 1]")
 
 
-def _score(metrics: Mapping[str, Any], name: str) -> float | None:
-    value = metrics.get(name)
-    return value if type(value) in (int, float) and 0 <= value <= 1 else None
+def _quality_warning(rule_id: str, rationale: str, *metrics: str) -> DiagnosticSignal:
+    return DiagnosticSignal(
+        rule_id, FailureType.UNKNOWN, SignalLevel.WARNING, None,
+        [EvidenceRef(["metrics", name]) for name in metrics], rationale, Confidence.LOW,
+    )
 
 
 def quality_signals(
     row: Mapping[str, Any], thresholds: QualityThresholds,
 ) -> list[DiagnosticSignal]:
+    if row.get("evaluation_status") == "error":
+        return [DiagnosticSignal(
+            "evaluation_error", FailureType.UNKNOWN, SignalLevel.WARNING, None,
+            [EvidenceRef(["evaluation_status"])], "Evaluator could not assess this result.", Confidence.HIGH,
+        )]
     if row.get("status") != "ok":
         return []
     metrics = row.get("metrics")
     if not isinstance(metrics, Mapping):
         return []
 
-    fact_recall = _score(metrics, "fact_recall")
-    retrieval_recall = _score(metrics, "retrieval_fact_recall")
-    final_recall = _score(metrics, "final_context_fact_recall")
-    faithfulness = _score(metrics, "faithfulness")
-    low_metrics = [
-        name for name, threshold in (
-            ("fact_recall", thresholds.fact_recall), ("answer_f1", thresholds.answer_f1),
-            ("answer_em", 1), ("retrieval_fact_recall", thresholds.retrieval_fact_recall),
-            ("faithfulness", thresholds.faithfulness),
-            ("final_context_fact_recall", thresholds.fact_recall),
-        )
-        if (value := _score(metrics, name)) is not None and value < threshold
-    ]
-    if not low_metrics:
-        return []
-    refs = [EvidenceRef(["metrics", name]) for name in low_metrics]
-    if retrieval_recall == 1 and final_recall is not None and final_recall < 1:
-        return [DiagnosticSignal(
-            "measured_context_loss", FailureType.CONTEXT_LOSS, SignalLevel.FAILURE, None,
-            refs + [EvidenceRef(["metrics", name]) for name in (
-                "retrieval_fact_recall", "final_context_fact_recall"
-            )],
-            "The final model context covered fewer reference facts than the retrieved evidence.",
-            Confidence.HIGH,
-        )]
-    if final_recall == 1 and fact_recall is not None and fact_recall < thresholds.fact_recall:
-        return [DiagnosticSignal(
-            "measured_answer_omission", FailureType.INCOMPLETE_ANSWER, SignalLevel.FAILURE, None,
-            refs + [EvidenceRef(["metrics", "final_context_fact_recall"])],
-            "The final model context covered all reference facts and the answer omitted some.",
-            Confidence.HIGH,
-        )]
-    if (isinstance(row.get("final_context"), str) and row["final_context"].strip()
-            and faithfulness is not None and faithfulness < thresholds.faithfulness):
-        return [DiagnosticSignal(
-            "unsupported_answer", FailureType.UNSUPPORTED_ANSWER, SignalLevel.FAILURE, None,
-            refs + [EvidenceRef(["final_context"])],
-            "The evaluator found insufficient support for the answer in the final context.",
-            Confidence.MEDIUM,
-        )]
+    scores = {}
+    invalid = []
+    for name in QUALITY_METRICS:
+        if name not in metrics or metrics[name] is None:
+            continue
+        value = metrics[name]
+        if is_quality_score(value):
+            scores[name] = value
+        else:
+            invalid.append(name)
 
-    signals = [DiagnosticSignal(
-        "low_quality_metrics", FailureType.UNKNOWN, SignalLevel.FAILURE, None, refs,
-        "One or more case metrics are below threshold; attribution requires more evidence.",
-        Confidence.HIGH,
-    )]
-    if retrieval_recall is not None and retrieval_recall < thresholds.retrieval_fact_recall:
+    signals = []
+    low = [name for name, value in scores.items() if value < getattr(thresholds, name)]
+    if low:
         signals.append(DiagnosticSignal(
-            "possible_retrieval_failure", FailureType.RETRIEVAL_FAILURE, SignalLevel.WARNING,
-            None, [EvidenceRef(["metrics", "retrieval_fact_recall"])],
-            "The retrieval metric is low; the trace does not establish a search failure.",
+            "low_quality_metrics", FailureType.UNKNOWN, SignalLevel.FAILURE, None,
+            [EvidenceRef(["metrics", name]) for name in low],
+            "One or more scores fall below their thresholds. The cause requires more evidence.",
             Confidence.LOW,
         ))
+    if invalid:
+        signals.append(DiagnosticSignal(
+            "invalid_quality_metrics", FailureType.UNKNOWN, SignalLevel.WARNING, None,
+            [EvidenceRef(["metrics", name]) for name in invalid],
+            "Evaluator quality scores must be numbers in [0, 1].", Confidence.HIGH,
+        ))
+    if "retrieval_fact_recall" in low:
+        evidence = [EvidenceRef(["metrics", "retrieval_fact_recall"])]
+        if "fact_recall" in low:
+            evidence.append(EvidenceRef(["metrics", "fact_recall"]))
+        signals.append(DiagnosticSignal(
+            "possible_retrieval_failure", FailureType.RETRIEVAL_FAILURE, SignalLevel.WARNING,
+            None, evidence, "Successful tool observations cover too few reference facts.", Confidence.LOW,
+        ))
+    if "fact_recall" in low:
+        if "retrieval_fact_recall" in scores and "retrieval_fact_recall" not in low:
+            signals.append(_quality_warning(
+                "answer_coverage_gap",
+                "Tool observations meet the retrieval threshold while the answer misses reference facts. "
+                "The final model context has not been measured.",
+                "fact_recall", "retrieval_fact_recall",
+            ))
+        else:
+            signals.append(_quality_warning("low_fact_recall", "The answer misses reference facts.", "fact_recall"))
+    if "faithfulness" in low:
+        signals.append(_quality_warning(
+            "low_faithfulness", "Some answer claims have insufficient support in tool observations.", "faithfulness",
+        ))
+    if "fact_precision" in low:
+        if "faithfulness" in low:
+            signals.append(_quality_warning(
+                "unsupported_precision_gap",
+                "Some claims may be unsupported by tool observations or disagree with reference facts.",
+                "fact_precision", "faithfulness",
+            ))
+        elif "faithfulness" in scores:
+            signals.append(_quality_warning(
+                "supported_precision_gap",
+                "Some claims may be supported by tool observations and still add details outside the reference facts.",
+                "fact_precision", "faithfulness",
+            ))
+        else:
+            signals.append(_quality_warning(
+                "low_fact_precision", "The answer has low agreement with the reference facts.", "fact_precision",
+            ))
     return signals

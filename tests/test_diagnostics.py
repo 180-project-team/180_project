@@ -16,7 +16,7 @@ class DiagnosticsContractTests(unittest.TestCase):
     def test_json_case_matches_batch_and_preserves_evidence_paths(self):
         row = {
             "case_id": "q1", "question": "When?", "answer": None,
-            "status": "error", "trajectory": None, "metrics": {"answer_em": None},
+            "status": "error", "trajectory": None, "metrics": {"fact_recall": None},
             "error": "timeout",
         }
         report = diagnose_case(json.dumps(row))
@@ -29,10 +29,10 @@ class DiagnosticsContractTests(unittest.TestCase):
             "question": "When?", "answer": "Today",
             "status": "ok", "trajectory": [], "metrics": {},
         }
-        for value in (True, "0.5", float("nan"), float("inf")):
+        for value in (True, "0.5", float("nan"), float("inf"), -0.1, 1.1):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
-                    diagnose_case(dict(row, metrics={"answer_f1": value}))
+                    diagnose_case(dict(row, metrics={"fact_recall": value}))
 
     def test_batch_preserves_identity_order_and_does_not_mutate_input(self):
         results = [

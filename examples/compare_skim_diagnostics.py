@@ -1,4 +1,4 @@
-"""Compare diagnostic categories and steps with labeled Skim Search episodes."""
+"""Compare diagnostic categories and steps with labeled Runner cases."""
 
 import argparse
 import json
@@ -8,7 +8,7 @@ from typing import Iterable
 
 from app.diagnostics import (
     DiagnosisReport, DiagnosisStatus, FailureClassifier, FailureType,
-    diagnose_case, skim_case,
+    diagnose_case,
 )
 
 
@@ -70,7 +70,7 @@ def compare(
     rules = Score()
     hybrid = Score()
     for labeled in cases:
-        case = labeled["case"] if "case" in labeled else skim_case(labeled["row"])
+        case = labeled["case"]
         label = FailureType(labeled["failure_type"])
         step = labeled.get("critical_step")
         rules.record(diagnose_case(case), label, step)
@@ -84,7 +84,7 @@ def compare(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("cases", type=Path, help="JSONL file with labeled Skim Search episodes")
+    parser.add_argument("cases", type=Path, help="JSONL file with labeled Runner cases and Evaluator scores")
     args = parser.parse_args()
     with args.cases.open(encoding="utf-8") as source:
         result = compare(json.loads(line) for line in source if line.strip())

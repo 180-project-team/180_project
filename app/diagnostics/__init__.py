@@ -5,7 +5,6 @@ from .classifier import Classification, FailureClassifier, LLMClassifier
 from .normalizer import normalize_trace
 from .quality import QualityThresholds
 from .rules import check_rules
-from .skim import skim_case
 from .models import (
     Confidence, DiagnosisBatchResult, DiagnosisReport, DiagnosisStatus,
     EvidenceRef, FailureType, SuggestedScope, TraceEvent, TraceEventType,
@@ -17,7 +16,7 @@ __all__ = [
     "diagnose", "diagnose_case", "Confidence", "DiagnosisBatchResult", "DiagnosisReport",
     "DiagnosisStatus", "EvidenceRef", "FailureType", "SuggestedScope",
     "normalize_trace", "TraceEvent", "TraceEventType",
-    "check_rules", "skim_case", "DiagnosticSignal", "SignalLevel",
+    "check_rules", "DiagnosticSignal", "SignalLevel",
     "BehaviorPattern", "DiagnosisSummary",
     "Hypothesis", "QualityThresholds",
     "Classification", "ClassifierAttempt", "FailureClassifier", "LLMClassifier",

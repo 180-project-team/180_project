@@ -16,7 +16,7 @@ from .models import (
     TraceEvent, TraceEventType,
 )
 from .normalizer import normalize_trace
-from .quality import QualityThresholds, quality_signals
+from .quality import QUALITY_METRICS, QualityThresholds, is_quality_score, quality_signals
 from .rules import check_rules
 
 
@@ -63,6 +63,7 @@ def _report(
     signals: list[DiagnosticSignal], run_id: str | None, version_id: str | None,
 ) -> DiagnosisReport:
     failures = [signal for signal in signals if signal.level == SignalLevel.FAILURE]
+    evaluation_failed = row.get("evaluation_status") == "error"
     primary = next(
         (signal for signal in failures if signal.failure_type != FailureType.UNKNOWN),
         failures[0] if failures else None,
@@ -90,17 +91,23 @@ def _report(
             rationale += " This terminal tool-error step is a candidate failure location, not a proven root cause."
         else:
             rationale += " A critical step cannot be established from the available observations."
-    elif row.get("status") == "ok":
+    elif row.get("status") == "ok" and not evaluation_failed:
         status = DiagnosisStatus.NO_FAILURE_DETECTED
         category, confidence = FailureType.UNKNOWN, Confidence.LOW
         rationale = "No failure detected by the available checks; answer correctness is not established."
     else:
         status = DiagnosisStatus.INSUFFICIENT_DATA
         category, confidence = FailureType.UNKNOWN, Confidence.LOW
-        rationale = "No failure established; completion status or final-answer data is insufficient."
+        rationale = ("Evaluator could not assess the result." if evaluation_failed else
+                     "No failure established; completion status or final-answer data is insufficient.")
 
-    hypotheses = hypotheses_for(primary) if primary is not None else []
-    scope = hypotheses[0].scope if hypotheses else SuggestedScope.UNKNOWN
+    primary_hypotheses = hypotheses_for(primary) if primary is not None else []
+    scope = primary_hypotheses[0].scope if primary_hypotheses else SuggestedScope.UNKNOWN
+    hypotheses = list(dict.fromkeys([
+        *primary_hypotheses,
+        *(hypothesis for signal in signals if signal.level == SignalLevel.WARNING
+          for hypothesis in hypotheses_for(signal)),
+    ]))
     refs: list[EvidenceRef] = []
     for signal in signals:
         for ref in signal.evidence_refs:
@@ -183,7 +190,11 @@ def diagnose_case(
     for name, value in metrics.items():
         if not isinstance(name, str) or not name:
             raise ValueError("metric names must be non-empty strings")
-        if value is not None and (
+        if value is None:
+            continue
+        if name in QUALITY_METRICS and not is_quality_score(value):
+            raise ValueError(f"Metric {name!r} must be a number in [0, 1] or null")
+        if (
             type(value) not in (int, float)
             or isinstance(value, float) and not math.isfinite(value)
         ):

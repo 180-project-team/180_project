@@ -1,6 +1,6 @@
 """Stable suggestions tied to observed failure types."""
 
-from .models import DiagnosticSignal, FailureType, Hypothesis, SuggestedScope
+from .models import DiagnosticSignal, FailureType, Hypothesis, SignalLevel, SuggestedScope
 
 
 _CATALOG = {
@@ -14,15 +14,15 @@ _CATALOG = {
     ),
     FailureType.RETRIEVAL_FAILURE: Hypothesis(
         "inspect_supporting_document_recall", SuggestedScope.STRUCTURAL,
-        "Verify the reference documents are indexed and compare their ranks under query and depth variants.",
+        "Inspect tool observations for the required facts and review the search queries and retrieval depth.",
     ),
     FailureType.CONTEXT_LOSS: Hypothesis(
         "inspect_context_selection", SuggestedScope.STRUCTURAL,
-        "Compare retrieved evidence with the context sent to the final model and inspect truncation and filtering.",
+        "If the final model input is available, compare it with retrieved evidence and inspect truncation and filtering.",
     ),
     FailureType.INCOMPLETE_ANSWER: Hypothesis(
         "check_required_answer_facts", SuggestedScope.PROMPT,
-        "Check whether the answer prompt asks the model to cover every required part of the question.",
+        "Identify which required parts of the question the answer omits and check the answer instructions.",
     ),
     FailureType.TOOL_OUTPUT_MISINTERPRETATION: Hypothesis(
         "check_evidence_interpretation", SuggestedScope.PROMPT,
@@ -30,7 +30,7 @@ _CATALOG = {
     ),
     FailureType.UNSUPPORTED_ANSWER: Hypothesis(
         "check_claim_grounding", SuggestedScope.PROMPT,
-        "Check whether the final-answer instructions require each claim to be supported by the visible context.",
+        "Compare claims in the answer with the tool observations and identify any unsupported claims.",
     ),
     FailureType.OUTPUT_FORMAT_ERROR: Hypothesis(
         "check_answer_format", SuggestedScope.PROMPT,
@@ -38,8 +38,32 @@ _CATALOG = {
     ),
 }
 
+_CHECK_ANSWER_RELEVANCE = Hypothesis(
+    "check_answer_relevance", SuggestedScope.PROMPT,
+    "Check whether the extra details address the question and are consistent with the reference facts.",
+)
+_QUALITY_HYPOTHESES = {
+    "possible_retrieval_failure": (_CATALOG[FailureType.RETRIEVAL_FAILURE],),
+    "low_fact_recall": (_CATALOG[FailureType.INCOMPLETE_ANSWER],),
+    "answer_coverage_gap": (
+        _CATALOG[FailureType.INCOMPLETE_ANSWER],
+        _CATALOG[FailureType.TOOL_OUTPUT_MISINTERPRETATION],
+        _CATALOG[FailureType.CONTEXT_LOSS],
+    ),
+    "low_fact_precision": (_CHECK_ANSWER_RELEVANCE,),
+    "supported_precision_gap": (_CHECK_ANSWER_RELEVANCE,),
+    "unsupported_precision_gap": (
+        _CATALOG[FailureType.UNSUPPORTED_ANSWER],
+        Hypothesis("check_claim_correctness", SuggestedScope.PROMPT,
+                   "Compare disputed claims with the reference facts and the observed tool evidence."),
+    ),
+    "low_faithfulness": (_CATALOG[FailureType.UNSUPPORTED_ANSWER],),
+}
+
 
 def hypotheses_for(signal: DiagnosticSignal) -> list[Hypothesis]:
+    if signal.level == SignalLevel.WARNING:
+        return list(_QUALITY_HYPOTHESES.get(signal.rule_id, ()))
     if signal.failure_type == FailureType.PREMATURE_STOP and signal.rule_id == "budget_stop":
         return [Hypothesis(
             "review_execution_budget", SuggestedScope.STRUCTURAL,

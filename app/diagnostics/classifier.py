@@ -10,6 +10,7 @@ from typing import Any, Mapping, Protocol
 from app.llm import LLMService
 
 from .models import DiagnosticSignal, FailureType
+from .quality import QUALITY_METRICS, is_quality_score
 
 _INSTRUCTIONS = (
     "Classify the document QA failure in the supplied question, answer, metrics and trace. "
@@ -49,10 +50,6 @@ class FailureClassifier(Protocol):
     def classify(
         self, state: Mapping[str, Any], candidates: tuple[FailureType, ...],
     ) -> Classification: ...
-
-
-def _is_unit_score(value: Any) -> bool:
-    return type(value) in (int, float) and 0 <= value <= 1
 
 
 def _criteria(candidates: tuple[FailureType, ...]) -> dict[str, str]:
@@ -113,12 +110,7 @@ def classifier_state(
     return {
         "question": _bounded_text(row.get("question"), 2000),
         "answer": _bounded_text(answer, 2000),
-        "metrics": {
-            name: metrics[name] for name in (
-                "answer_em", "answer_f1", "fact_recall", "retrieval_fact_recall",
-                "faithfulness", "final_context_fact_recall",
-            ) if _is_unit_score(metrics.get(name))
-        },
+        "metrics": {name: metrics[name] for name in QUALITY_METRICS if is_quality_score(metrics.get(name))},
         "trace": excerpts,
     }
 

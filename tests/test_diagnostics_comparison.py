@@ -21,6 +21,6 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(rules["correct_categories"], 7)
         self.assertEqual(hybrid["classifier_calls"], 0)
         self.assertEqual(hybrid["mean_cost_per_case_usd"], 0.0)
-        self.assertAlmostEqual(hybrid["unknown_rate"], 6 / 9)
+        self.assertAlmostEqual(hybrid["unknown_rate"], 7 / 9)
         self.assertEqual(hybrid["labeled_steps"], 2)
         self.assertEqual(hybrid["step_accuracy"], 1)
