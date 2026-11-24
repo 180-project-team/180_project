@@ -138,6 +138,33 @@ Evaluator. `execution_metrics` содержит доступные `duration_ms`
 | `["metrics", "fact_recall"]` | `fact_recall` в Evaluator |
 | `["evaluation_status"]` | `status` в Evaluator |
 
+### Диагностика по файлам
+
+```python
+from app.diagnostics import diagnose_run
+
+batch = diagnose_run(
+    run_results_path=run_results_path,
+    evaluation_results_path=evaluation_results_path,
+    output_dir=output_dir,
+    run_id="run-1",
+    version_id="agent-v1",
+)
+```
+
+Функция возвращает `DiagnosisBatchResult` и сохраняет в указанном каталоге
+`diagnoses.jsonl` с одним `DiagnosisReport` на задание в порядке Runner и
+`summary.json` с `DiagnosisSummary`. Обе записи используют UTF-8. Пороги можно
+передать через `quality_thresholds`. Для гибридной диагностики передайте уже
+запущенный `llm_service` и управляйте его жизненным циклом в вызывающем коде.
+
+При повторном вызове оба отчёта заменяются целиком. Проверка входных данных и
+совпадения входных и выходных путей выполняется до записи. Оба файла сначала
+готовятся во временном каталоге, затем каждый заменяется отдельно. Ошибки
+ввода-вывода передаются вызывающей стороне. Если ошибка произошла между двумя
+заменами, повторите запуск для восстановления пары. Для одновременных запусков
+вызывающая сторона задаёт отдельные выходные каталоги.
+
 ### Метрики Evaluator
 
 `fact_recall` оценивает полноту ответа по эталонным фактам, `fact_precision` —

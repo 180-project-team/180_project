@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Iterator, NoReturn
 
-from .quality import QUALITY_METRICS
+from app.llm import LLMService
+
+from .classifier import LLMClassifier
+from .core import diagnose
+from .models import DiagnosisBatchResult
+from .quality import QUALITY_METRICS, QualityThresholds
 
 
 _EXECUTION_METRICS = (
@@ -108,3 +115,56 @@ def load_diagnostic_cases(
         )
         cases.append(case)
     return cases
+
+
+def _check_output_paths(inputs: tuple[Path, Path], outputs: tuple[Path, Path]) -> None:
+    for output in outputs:
+        resolved = output.resolve()
+        for source in inputs:
+            if resolved == source.resolve() or (output.exists() and output.samefile(source)):
+                raise ValueError(f"Output path {output} overlaps input artifact {source}")
+        if output.is_dir():
+            raise IsADirectoryError(f"Diagnostic output path is a directory: {output}")
+
+
+def diagnose_run(
+    *,
+    run_results_path: str | Path,
+    evaluation_results_path: str | Path,
+    output_dir: str | Path,
+    llm_service: LLMService | None = None,
+    run_id: str | None = None,
+    version_id: str | None = None,
+    quality_thresholds: QualityThresholds = QualityThresholds(),
+) -> DiagnosisBatchResult:
+    """Diagnose explicit input files and replace the two reports in output_dir.
+
+    The caller manages the optional LLM service. Both reports are written to
+    temporary files before publishing. Replacement is atomic per file.
+    """
+    inputs = Path(run_results_path), Path(evaluation_results_path)
+    cases = load_diagnostic_cases(*inputs)
+    directory = Path(output_dir).resolve()
+    reports_path = directory / "diagnoses.jsonl"
+    summary_path = directory / "summary.json"
+    outputs = reports_path, summary_path
+    _check_output_paths(inputs, outputs)
+
+    batch = diagnose(
+        cases, run_id=run_id, version_id=version_id, quality_thresholds=quality_thresholds,
+        classifier=LLMClassifier(llm_service) if llm_service is not None else None,
+    )
+
+    directory.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=directory, prefix=".diagnostics-") as temporary:
+        staging = Path(temporary)
+        with (staging / reports_path.name).open("w", encoding="utf-8", newline="\n") as reports:
+            for report in batch.reports:
+                json.dump(asdict(report), reports, ensure_ascii=False, allow_nan=False)
+                reports.write("\n")
+        summary = json.dumps(asdict(batch.summary), ensure_ascii=False, allow_nan=False, indent=2)
+        (staging / summary_path.name).write_text(summary + "\n", encoding="utf-8", newline="\n")
+        for output in outputs:
+            (staging / output.name).replace(output)
+
+    return batch
