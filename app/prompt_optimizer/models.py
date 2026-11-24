@@ -91,6 +91,12 @@ class PromptState:
             raise ValueError("PromptState content hash does not match stored version")
         return state
 
+@dataclass(frozen=True)
+class PromptLesson:
+    pattern_id: str
+    component_id: str
+    instruction: str
+    evidence_refs: tuple[str, ...]
 
 @dataclass(frozen=True)
 class PromptPatch:

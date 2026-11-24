@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .evaluation_report import EvaluationReport
 from .models import PromptComponent, PromptPatch, PromptState, digest
 from .renderer import PromptRenderer, placeholders
 
@@ -108,7 +109,6 @@ class SelectionPolicy:
         self.config = config or SelectionConfig()
 
     def compare(self, parent: "EvaluationReport", candidate: "EvaluationReport") -> SelectionDecision:
-        from .evaluation import EvaluationReport
 
         if not isinstance(parent, EvaluationReport) or not isinstance(candidate, EvaluationReport):
             raise TypeError("SelectionPolicy requires evaluation reports")

@@ -5,8 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Protocol
 
-from .diagnosis import PromptLesson
-from .models import PromptPatch, PromptState, digest
+from .models import PromptLesson, PromptPatch, PromptState, digest
 
 
 class PromptModelPort(Protocol):

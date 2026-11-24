@@ -6,12 +6,12 @@ import unittest
 from pathlib import Path
 
 from app.prompt_optimizer import (
-    BehaviorAnalyzer, ExperimentStore, LLMPatchGenerator, OptimizationConfig,
-    PromptComponent, PromptGuard, PromptOptimizer, PromptPatch, PromptRenderer,
-    PromptState, RunnerEvaluationHarness, SelectionConfig, SelectionPolicy, digest,
+    LLMPatchGenerator, PromptComponent, PromptGuard, PromptPatch,
+    PromptRenderer, PromptState, SelectionConfig, SelectionPolicy, digest,
+    load_evaluation_report, propose_candidate,
 )
-from app.prompt_optimizer.evaluation import EvaluationItem, EvaluationReport
-
+from app.prompt_optimizer.evaluation_report import EvaluationItem, EvaluationReport
+from app.prompt_optimizer.models import PromptLesson
 
 class PromptModelTests(unittest.TestCase):
     def setUp(self):
@@ -88,7 +88,6 @@ class PromptModelTests(unittest.TestCase):
         class FakeLLM:
             def chat(self, messages, **kwargs):
                 return json.dumps({"operation": "APPEND_RULE", "payload": "Check sources", "rule_id": "check", "rationale": "Evidence"})
-        from app.prompt_optimizer.diagnosis import PromptLesson
         lesson = PromptLesson("incorrect_answer-1", "system.core", "Check evidence", ("run#1",))
         patch = LLMPatchGenerator(FakeLLM()).generate(self.state, lesson)
         self.assertEqual(patch.operation, "APPEND_RULE")
@@ -96,25 +95,50 @@ class PromptModelTests(unittest.TestCase):
         self.assertEqual(patch.before_hash, digest("Answer {question}"))
 
 
-class DiagnosisTests(unittest.TestCase):
-    def test_uses_execution_trajectory_for_pattern_and_attribution(self):
-        from app.prompt_optimizer.diagnosis import PromptAttribution, LessonExtractor
-        state = PromptState((
+class ProposalTests(unittest.TestCase):
+    def setUp(self):
+        from examples.prompt_optimizer_example import demo_diagnosis
+
+        self.state = PromptState((
+            PromptComponent("system.core", "system", "Answer the question."),
             PromptComponent("verifier.instructions", "system", "Check your answer."),
-            PromptComponent("output.format", "system", "Return JSON."),
+            PromptComponent("policy.safety", "system", "Keep data private", editable=False),
         ))
-        report = EvaluationReport("v1", "optimize", Path("runs/sample"), (
-            EvaluationItem("q-1", 0.0, "ok", 2.0, None, "runs/sample/results.jsonl#q-1",
-                           trace_events=({"event": "skipped_verification"},)),
-        ))
-        pattern = BehaviorAnalyzer().analyze(report)[0]
-        self.assertEqual(pattern.kind, "insufficient_verification")
-        self.assertEqual(pattern.affected_tasks, ("q-1",))
-        diagnosis = PromptAttribution().attribute(pattern, state)
-        self.assertEqual(diagnosis.component_id, "verifier.instructions")
-        lesson = LessonExtractor().extract(pattern, diagnosis)
-        self.assertIn("verify", lesson.instruction)
-        self.assertEqual(lesson.evidence_refs, pattern.evidence_refs)
+        self.diagnosis = demo_diagnosis("run-1", "q1")
+
+    def test_uses_existing_diagnosis_to_choose_an_editable_component(self):
+        from examples.prompt_optimizer_example import make_generator
+
+        self.diagnosis["signals"] = [{
+            "failure_type": "UNSUPPORTED_ANSWER",
+            "component_id": "verifier.instructions",
+        }]
+        candidate, patch = propose_candidate(self.state, self.diagnosis, make_generator())
+        self.assertEqual(patch.component_id, "verifier.instructions")
+        self.assertEqual(patch.evidence_refs, ("run-1#q1:trajectory.0",))
+        self.assertEqual(candidate.parent_id, self.state.prompt_version_id)
+        self.assertEqual(candidate.get("system.core"), self.state.get("system.core"))
+        self.assertEqual(candidate.get("policy.safety"), self.state.get("policy.safety"))
+
+    def test_skips_structural_diagnosis(self):
+        class UnusedGenerator:
+            def generate(self, state, lesson):
+                raise AssertionError("A structural diagnosis should not invoke the prompt generator")
+
+        self.diagnosis["suggested_scope"] = "STRUCTURAL"
+        self.assertIsNone(propose_candidate(self.state, self.diagnosis, UnusedGenerator()))
+
+    def test_rejects_no_op(self):
+        class NoOpGenerator:
+            def generate(self, state, lesson):
+                component = state.get(lesson.component_id)
+                return PromptPatch(
+                    component.component_id, "REPLACE_COMPONENT", digest(component.template),
+                    component.template, "No-op", lesson.evidence_refs,
+                )
+
+        with self.assertRaisesRegex(ValueError, "non-empty change"):
+            propose_candidate(self.state, self.diagnosis, NoOpGenerator())
 
 
 class ComparatorTests(unittest.TestCase):
@@ -136,66 +160,36 @@ class ComparatorTests(unittest.TestCase):
 
 
 class EndToEndTests(unittest.TestCase):
-    def test_optimizer_runs_with_project_runner_and_persists_all_artifacts(self):
-        from examples.prompt_optimizer_example import make_adapter, make_generator
-        with tempfile.TemporaryDirectory() as temporary:
-            state = PromptState((PromptComponent("system.core", "system", "Answer quickly."),
-                                 PromptComponent("policy.safety", "system", "Keep secrets private", editable=False)))
-            train = [{"id": "train-1", "question": "2+2", "reference_answer": "4"},
-                     {"id": "train-2", "question": "1+1", "reference_answer": "2"}]
-            valid = [{"id": "val-1", "question": "3+3", "reference_answer": "6"},
-                     {"id": "val-2", "question": "4+4", "reference_answer": "8"}]
-            optimizer = PromptOptimizer(
-                RunnerEvaluationHarness(make_adapter), make_generator(),
-                store=ExperimentStore(temporary),
-                config=OptimizationConfig(max_iterations=2, candidates_per_iteration=1),
+    def test_compares_prompt_versions_using_supplied_reports(self):
+        from examples.prompt_optimizer_example import DemoEvaluationHarness, demo_diagnosis, make_generator
+
+        state = PromptState((PromptComponent("system.core", "system", "Answer quickly."),))
+        validation = [{"id": "q1", "question": "3+3", "reference_answer": "6"}]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            harness = DemoEvaluationHarness()
+            before = harness.evaluate(state, validation, seed=42, split="validation", runs_root=root)
+            candidate, _ = propose_candidate(state, demo_diagnosis("training", "train-1"), make_generator())
+            after = harness.evaluate(candidate, validation, seed=42, split="validation", runs_root=root)
+
+            self.assertEqual([before.score, after.score], [0.0, 1.0])
+            self.assertTrue(SelectionPolicy().compare(before, after).accepted)
+            self.assertTrue((after.run_dir / "results.jsonl").is_file())
+            self.assertTrue((after.run_dir / "demo_evaluation.jsonl").is_file())
+
+    def test_rejects_an_evaluator_report_for_another_question(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            answers = root / "runner.jsonl"
+            scores = root / "evaluator.jsonl"
+            answers.write_text(json.dumps({"id": "q1"}) + "\n", encoding="utf-8")
+            scores.write_text(
+                json.dumps({"id": "q2", "status": "ok", "fact_recall": 1}) + "\n",
+                encoding="utf-8",
             )
-            result = optimizer.optimize(state, train, valid)
-            self.assertEqual(result.baseline_validation_score, 0)
-            self.assertEqual(result.selected_validation_score, 1)
-            self.assertEqual(result.accepted_iterations, 1)
-            self.assertEqual(result.stop_reason, "no_failures")
-            self.assertTrue((result.session_dir / "iterations" / "001" / "diagnosis.json").exists())
-            self.assertTrue((result.session_dir / "versions" / f"{result.selected_version_id}.json").exists())
-            self.assertEqual(len(list((result.session_dir / "agent_runs").iterdir())), 4)
-            session = json.loads((result.session_dir / "session.json").read_text())
-            self.assertEqual(session["status"], "completed")
-            attempts = json.loads((result.session_dir / "iterations" / "001" / "candidates.json").read_text())
-            self.assertEqual(attempts[0]["status"], "accepted")
+            with self.assertRaisesRegex(ValueError, "same non-empty set of task ids"):
+                load_evaluation_report(answers, scores, prompt_version_id="v0", split="validation")
 
-    def test_not_prompt_fixable_if_only_runner_errors(self):
-        from app.runner import CallableAdapter
-        class BrokenAgent:
-            def ask(self, question):
-                raise RuntimeError("tool unavailable")
-        with tempfile.TemporaryDirectory() as temporary:
-            state = PromptState((PromptComponent("system.core", "system", "Do your best"),))
-            class Generator:
-                def generate(self, state, lesson):
-                    raise AssertionError("LLM must not be called for execution errors")
-            result = PromptOptimizer(RunnerEvaluationHarness(lambda state, seed: CallableAdapter(BrokenAgent)),
-                                     Generator(), store=ExperimentStore(temporary)).optimize(
-                                         state, [{"id": "train-1", "question": "hi", "reference_answer": "x"}],
-                                         [{"id": "val-1", "question": "hi", "reference_answer": "x"}])
-            self.assertEqual(result.stop_reason, "not_prompt_fixable")
-
-    def test_rejected_candidates_are_recorded(self):
-        from examples.prompt_optimizer_example import make_adapter
-        class NoOpGenerator:
-            def generate(self, state, lesson):
-                component = state.get(lesson.component_id)
-                return PromptPatch(component.component_id, "REPLACE_COMPONENT", digest(component.template),
-                                   "Answer quickly.", "No-op", lesson.evidence_refs)
-        with tempfile.TemporaryDirectory() as temporary:
-            initial = PromptState((PromptComponent("system.core", "system", "Answer quickly."),))
-            task = [{"id": "train-1", "question": "2+2", "reference_answer": "4"}]
-            val = [{"id": "val-1", "question": "3+3", "reference_answer": "6"}]
-            result = PromptOptimizer(RunnerEvaluationHarness(make_adapter), NoOpGenerator(),
-                                     store=ExperimentStore(temporary),
-                                     config=OptimizationConfig(max_iterations=1, candidates_per_iteration=1)).optimize(initial, task, val)
-            self.assertEqual(result.stop_reason, "no_accepted_candidate")
-            candidates = json.loads((result.session_dir / "iterations" / "001" / "candidates.json").read_text())
-            self.assertEqual(candidates[0]["status"], "rejected")
 
 
 if __name__ == "__main__":
