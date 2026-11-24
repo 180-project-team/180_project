@@ -1669,12 +1669,19 @@ dependencies = [
     { name = "ragas" },
 ]
 
+[package.optional-dependencies]
+huggingface = [
+    { name = "datasets" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "datasets" },
+    { name = "datasets", marker = "extra == 'huggingface'", specifier = ">=3" },
     { name = "openai" },
     { name = "ragas", specifier = "==0.4.4" },
 ]
+provides-extras = ["huggingface"]
 
 [[package]]
 name = "propcache"
