@@ -1,7 +1,7 @@
 """Public diagnostics interface."""
 
 from .core import diagnose, diagnose_case
-from .classifier import ChatClassifier, Classification, FailureClassifier
+from .classifier import Classification, FailureClassifier, LLMClassifier
 from .normalizer import normalize_trace
 from .quality import QualityThresholds
 from .rules import check_rules
@@ -20,5 +20,5 @@ __all__ = [
     "check_rules", "skim_case", "DiagnosticSignal", "SignalLevel",
     "BehaviorPattern", "DiagnosisSummary",
     "Hypothesis", "QualityThresholds",
-    "ChatClassifier", "Classification", "ClassifierAttempt", "FailureClassifier",
+    "Classification", "ClassifierAttempt", "FailureClassifier", "LLMClassifier",
 ]

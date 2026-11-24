@@ -125,23 +125,26 @@ uv run --locked python -m examples.diagnose_skim path/to/rows.jsonl
 
 ### Опциональная классификация через API
 
-`ChatClassifier` работает с OpenAI-совместимым Chat Completions API,
-поддерживающим JSON Schema.
+`LLMClassifier` принимает готовый `LLMService`. Вызывающая сторона управляет
+жизненным циклом сервиса.
 
 ```python
-from app.diagnostics import ChatClassifier, diagnose_case, skim_case
+from app.diagnostics import LLMClassifier, diagnose_case
+from app.llm import LLMService
 
-classifier = ChatClassifier(base_url="http://127.0.0.1:8000/v1", model="local-model")
-report = diagnose_case(skim_case(row), classifier=classifier)
+with LLMService(model="local-model") as llm_service:
+    report = diagnose_case(case, classifier=LLMClassifier(llm_service))
 ```
 
 Без явно переданного классификатора все проверки выполняются локально.
 
 Для вызова API нужны низкая метрика и несколько кандидатов, подкреплённых
-локальными сигналами. Провайдер получает вопрос, ответ, численные метрики
-и ограниченные фрагменты релевантных шагов. Модель выбирает категорию из списка,
-включая `UNKNOWN`. Свидетельства и гипотезы подбирает код. Таймаут и некорректный
-ответ сохраняют локальный вывод.
+локальными сигналами. Сервис получает ограниченные выдержки из вопроса, ответа
+и релевантных шагов, а также численные метрики. Поля `raw_output` и `traceback`
+исключаются, распознаваемые учётные данные в тексте маскируются. Модель возвращает
+JSON с одной допустимой категорией, включая `UNKNOWN`. Ошибка вызова,
+некорректный ответ или `UNKNOWN` сохраняют локальный вывод. При использовании
+`LLMClassifier` стоимость вызова остаётся `null`.
 
 ## Выходной контракт
 
