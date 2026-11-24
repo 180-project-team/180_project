@@ -1,6 +1,7 @@
 """Public diagnostics interface."""
 
 from .core import diagnose, diagnose_case
+from .artifacts import load_diagnostic_cases
 from .classifier import Classification, FailureClassifier, LLMClassifier
 from .normalizer import normalize_trace
 from .quality import QualityThresholds
@@ -13,7 +14,8 @@ from .models import (
 )
 
 __all__ = [
-    "diagnose", "diagnose_case", "Confidence", "DiagnosisBatchResult", "DiagnosisReport",
+    "diagnose", "diagnose_case", "load_diagnostic_cases",
+    "Confidence", "DiagnosisBatchResult", "DiagnosisReport",
     "DiagnosisStatus", "EvidenceRef", "FailureType", "SuggestedScope",
     "normalize_trace", "TraceEvent", "TraceEventType",
     "check_rules", "DiagnosticSignal", "SignalLevel",

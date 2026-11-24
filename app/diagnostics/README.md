@@ -98,6 +98,46 @@ diagnose(
 
 Пустая пачка возвращает пустой список отчётов и сводку с нулевыми счётчиками.
 
+### Загрузка артефактов Runner и Evaluator
+
+```python
+from app.diagnostics import diagnose, load_diagnostic_cases
+
+cases = load_diagnostic_cases(run_results_path, evaluation_results_path)
+batch = diagnose(cases)
+```
+
+`load_diagnostic_cases()` принимает два явно заданных пути `str` или `Path`
+к UTF-8 JSONL. Абсолютные пути можно передавать из любого рабочего каталога.
+Пустые строки пропускаются. Остальные строки должны содержать JSON-объекты
+со статусом `ok` или `error`. В записи Runner нужен непустой вопрос.
+Если передана траектория, её значение должно быть массивом или `null`.
+
+Строковые и целочисленные `id` приводятся к `str(id).strip()`. Пустые ID,
+логические значения и дубликаты после приведения вызывают `ValueError`.
+Оба файла должны содержать одинаковый непустой набор ID. При расхождении
+ошибка перечисляет недостающие ID для каждого файла. Порядок записей Runner
+сохраняется.
+
+В объединённой записи нормализованный `id` становится `case_id`. Остальные
+поля Runner, включая `status`, `duration_ms` и `trajectory`, сохраняют свои
+пути. `evaluation_status`, `metrics` и `execution_metrics` заполняются полями
+Evaluator. `execution_metrics` содержит доступные `duration_ms` и счётчики
+вызовов инструментов Evaluator. Поля `case_id`, `evaluation_status`, `metrics`
+и `execution_metrics` зарезервированы адаптером. При их наличии во входной
+записи Runner загрузка сообщает о конфликте. Оценки переносятся как есть,
+включая `null`, ноль и некорректные значения. Их обрабатывает `diagnose()`.
+
+Чтобы восстановить свидетельство, загрузите ту же пару файлов, выберите
+запись с `case_id` отчёта и пройдите по `EvidenceRef.path`. Происхождение
+типичных путей указано в таблице.
+
+| Путь в объединённой записи | Поле исходной записи с тем же нормализованным ID |
+| --- | --- |
+| `["trajectory", 0, "observation"]` | `trajectory[0].observation` в Runner |
+| `["metrics", "fact_recall"]` | `fact_recall` в Evaluator |
+| `["evaluation_status"]` | `status` в Evaluator |
+
 ### Метрики Evaluator
 
 `fact_recall` оценивает полноту ответа по эталонным фактам, `fact_precision` —
@@ -187,6 +227,10 @@ with LLMService(model="local-model") as llm_service:
 | `signals` | Все полученные сигналы, включая предупреждения |
 | `hypotheses` | Гипотезы для основной категории с полями `hypothesis_id`, `scope`, `advice` |
 | `classifier_attempt` | Статус вызова классификатора и стоимость, если её сообщил сервис |
+
+При основной технической ошибке `suggested_scope` отражает её область проверки.
+Дополнительная семантическая гипотеза может относиться к другой области.
+Prompt Optimizer ориентируется на `suggested_scope` основного отчёта.
 
 | Статус | Условие |
 | --- | --- |
