@@ -86,10 +86,56 @@ class DiagnosticRuleTests(unittest.TestCase):
         ]}
         self.assertEqual(self.check(result), [])
 
+    def test_later_search_with_different_arguments_keeps_error_and_adds_evidence(self):
+        result = {"status": "ok", "answer": "42", "trajectory": [
+            {"action": "bm25_search", "args": {"query": "original"}, "observation": "ERROR: Timeout"},
+            {"action": "bm25_search", "args": {"query": "other"}, "observation": "(episode ended)"},
+            {"action": "visit", "observation": "Document"},
+            {"action": "bm25_search", "args": {"query": "rephrased"}, "observation": "Listing"},
+        ]}
+        signal, = self.check(result)
+        self.assertEqual(signal.rule_id, "tool_error")
+        self.assertEqual(signal.level, SignalLevel.FAILURE)
+        self.assertEqual([ref.path for ref in signal.evidence_refs],
+                         [["trajectory", 0, "observation"], ["trajectory", 3, "observation"]])
+        self.assertIn("returned a result at a later step", signal.rationale)
+        self.assertIn("effect of the error on the final answer is unknown", signal.rationale)
+
+    def test_control_errors_do_not_become_tool_errors(self):
+        signal, = self.check({"trajectory": [
+            {"action": "fix_rejected", "observation": "ERROR: Fix rejected"},
+            {"action": "none", "observation": "ERROR: no tool call found."},
+            {"action": "fix", "observation": "(episode ended)"},
+        ]})
+        self.assertEqual(signal.failure_type, FailureType.INVALID_TOOL_CALL)
+        self.assertEqual(signal.step_index, 1)
+        self.assertEqual(signal.component_id, "none")
+
+    def test_unknown_tool_error_retains_attempted_call_and_result(self):
+        result = {"trajectory": [{"action": "other", "args": {}, "observation": "ERROR: unknown tool 'other'."}]}
+        call, observation = normalize_trace(result)
+        self.assertEqual(call.event_type, TraceEventType.TOOL_CALL)
+        self.assertEqual(call.tool_call_id, observation.tool_call_id)
+        signal, = self.check(result)
+        self.assertEqual(signal.failure_type, FailureType.INVALID_TOOL_CALL)
+        self.assertEqual(signal.evidence_refs, [observation.error_ref])
+
+    def test_budget_stop_uses_an_observed_budget_step_when_available(self):
+        trace = [{"action": "bm25_search"}, {"action": "budget"}, {"action": "answer"}]
+        self.assertEqual(self.check({"trajectory": trace}), [])
+        signal, = self.check({"stopped": "ctx_budget", "trajectory": trace})
+        self.assertEqual(signal.rule_id, "budget_stop")
+        self.assertEqual(signal.step_index, 1)
+        self.assertEqual([ref.path for ref in signal.evidence_refs], [["stopped"], ["trajectory", 1]])
+        signal, = self.check({"stopped": "max_turns"})
+        self.assertIsNone(signal.step_index)
+        self.assertEqual(signal.evidence_refs, [EvidenceRef(["stopped"])])
+
     def test_repeated_search_counts_each_call_once(self):
         steps = [
-            {"action": "bm25_search", "query": query, "observation": "Listing"}
-            for query in ("same", "other", "same")
+            {"action": "bm25_search", "observation": "Listing", **query}
+            for query in ({"args": {"query": "same"}}, {"query": "other"},
+                          {"args": {"query": "same"}, "query": "other"})
         ]
         self.assertEqual(self.check({"trajectory": steps[:2]}), [])
         signal, = self.check({"trajectory": steps})

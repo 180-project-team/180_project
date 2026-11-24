@@ -9,6 +9,7 @@ from .models import (
     Confidence, DiagnosticSignal, EvidenceRef, FailureType, SignalLevel,
     TraceEvent, TraceEventType,
 )
+from .normalizer import _action_name, _is_error_observation, _search_query, _step_type
 
 _INVALID_SKIM_OBSERVATIONS = (
     "ERROR: your <tool_call> block was empty.",
@@ -18,52 +19,81 @@ _INVALID_SKIM_OBSERVATIONS = (
     "ERROR: rank ",
     "ERROR: ambiguous doc ",
     "ERROR: no such doc ",
+    "ERROR: unknown tool ",
+    "ERROR: invalid tool call (",
 )
 _BUDGET_STOPS = ("max_steps", "max_turns", "ctx_budget")
 
 
-def _skim_execution_signals(result: Mapping[str, Any]) -> list[DiagnosticSignal]:
+def _later_tool_result(
+    steps: Sequence[Any], index: int, step: Mapping[str, Any], action: str,
+) -> tuple[int | None, bool]:
+    """Find a later result from this tool, preferring an observed exact search retry."""
+    args = step.get("args")
+    query = _search_query(step, action)
+    first_result = None
+    for later_index in range(index + 1, len(steps)):
+        later = steps[later_index]
+        if not isinstance(later, Mapping) or _action_name(later) != action:
+            continue
+        observation = later.get("observation")
+        if (not isinstance(observation, str) or not observation.strip()
+                or _is_error_observation(observation) or _step_type(later, action) != TraceEventType.TOOL_CALL):
+            continue
+        if (query is not None and isinstance(args, Mapping) and args and later.get("args") == args
+                and _search_query(later, action) == query):
+            return later_index, True
+        if first_result is None:
+            first_result = later_index
+    return first_result, False
+
+
+def _skim_execution_signals(
+    result: Mapping[str, Any], events: Sequence[TraceEvent],
+) -> list[DiagnosticSignal]:
     trace = result.get("trajectory")
     steps = trace if isinstance(trace, list) else []
     signals = []
-    if result.get("trace_format") == "skim_search" and result.get("stopped") in _BUDGET_STOPS:
+    if result.get("stopped") in _BUDGET_STOPS:
+        budget = next((event for event in reversed(events)
+                       if event.event_type == TraceEventType.MODEL_RESPONSE and event.component_id == "budget"), None)
+        refs = [EvidenceRef(["stopped"])]
+        if budget is not None:
+            refs.append(budget.payload_ref)
         signals.append(DiagnosticSignal(
             "budget_stop", FailureType.PREMATURE_STOP, SignalLevel.FAILURE,
-            len(steps) - 1 if steps else None, [EvidenceRef(["stopped"])],
+            budget.step_index if budget is not None else None, refs,
             "The agent reached its execution budget.", Confidence.HIGH,
         ))
 
     for index, step in enumerate(steps):
-        if not isinstance(step, Mapping) or not isinstance(step.get("action"), str):
+        if not isinstance(step, Mapping):
             continue
-        action = step["action"]
+        action = _action_name(step)
         observation = step.get("observation")
-        if not isinstance(observation, str) or not observation.startswith("ERROR"):
+        if not _is_error_observation(observation):
             continue
-        if action in {"budget", "answer", "submit", "stop"}:
+        is_tool = _step_type(step, action) == TraceEventType.TOOL_CALL
+        if not is_tool and action != "none":
             continue
-        invalid = observation.startswith(_INVALID_SKIM_OBSERVATIONS)
-        # The same visit rank may resolve to a different document after a new search.
-        args = step.get("args")
-        retry = next((
-            later_index for later_index, later in enumerate(steps[index + 1:], index + 1)
-            if action == "bm25_search" and isinstance(args, Mapping) and args
-            and isinstance(later, Mapping) and later.get("action") == action
-            and later.get("args") == args and isinstance(later.get("observation"), str)
-            and later["observation"] and not later["observation"].startswith("ERROR")
-        ), None)
+        invalid = observation.lstrip().startswith(_INVALID_SKIM_OBSERVATIONS)
+        later_index, exact_retry = _later_tool_result(steps, index, step, action) if is_tool else (None, False)
         refs = [EvidenceRef(["trajectory", index, "observation"])]
-        if retry is not None:
-            refs.append(EvidenceRef(["trajectory", retry, "observation"]))
-        level = SignalLevel.WARNING if retry is not None or action == "none" and not invalid else SignalLevel.FAILURE
+        rationale = "Skim recorded an error for this action."
+        if later_index is not None:
+            refs.append(EvidenceRef(["trajectory", later_index, "observation"]))
+            if exact_retry:
+                rationale += " A later search with the same query and arguments returned a result."
+            else:
+                rationale += " The same tool returned a result at a later step."
+            rationale += " The effect of the error on the final answer is unknown."
+        level = SignalLevel.WARNING if exact_retry or action == "none" and not invalid else SignalLevel.FAILURE
         category = (FailureType.INVALID_TOOL_CALL if invalid else
                     FailureType.OUTPUT_FORMAT_ERROR if action == "none" else
                     FailureType.TOOL_EXECUTION_FAILURE)
         signals.append(DiagnosticSignal(
             "invalid_tool_call" if invalid else "model_turn_error" if action == "none" else "tool_error",
-            category, level, index, refs,
-            "A later attempt with the same search arguments completed."
-            if retry is not None else "Skim recorded an error for this action.",
+            category, level, index, refs, rationale,
             Confidence.HIGH if invalid else Confidence.MEDIUM, action,
         ))
     return signals
@@ -94,7 +124,7 @@ def check_rules(
             Confidence.HIGH,
         ))
 
-    signals.extend(_skim_execution_signals(result))
+    signals.extend(_skim_execution_signals(result, events))
     skim_refs = [ref for signal in signals for ref in signal.evidence_refs]
     for event in events:
         if (event.event_type == TraceEventType.TOOL_RESULT and event.error_ref is not None
