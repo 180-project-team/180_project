@@ -13,13 +13,13 @@ from examples.diagnose_runner import run_example
 
 class DiagnosticsIntegrationTests(unittest.TestCase):
     def setUp(self):
-        self.runs_root = self.enterContext(TemporaryDirectory())
+        self.run_dir = self.enterContext(TemporaryDirectory())
 
     def test_example_runs_all_scenarios_through_existing_runner(self):
-        run_report, batch = run_example(runs_root=self.runs_root)
-        rows = run_report.load_results()
-        self.assertEqual(batch.summary.run_id, run_report.run_id)
-        self.assertEqual(run_report.failed_count, 1)
+        rows, batch = run_example(run_dir=self.run_dir)
+        self.assertEqual(batch.summary.run_id, "demo-run")
+        self.assertEqual(batch.summary.version_id, "demo-v1")
+        self.assertEqual(sum(row["status"] == "error" for row in rows), 1)
         self.assertEqual([report.case_id for report in batch.reports],
                          [row["id"] for row in rows])
         self.assertEqual([report.status for report in batch.reports], [
@@ -56,10 +56,9 @@ class DiagnosticsIntegrationTests(unittest.TestCase):
                 return {"error": "Synthetic failure", "trajectory": [
                     {"action": "bm25_search", "observation": "ERROR: Timeout"}
                 ], "traceback": "Synthetic traceback"}
-        run_report = AgentRunner(lambda: CallableAdapter(ErrorAgent), runs_root=self.runs_root).run([
-            {"question": "question without dataset identifier"},
-        ])
-        row, = run_report.load_results()
+        runner = AgentRunner(lambda _: CallableAdapter(ErrorAgent))
+        row, = runner.run([{"question": "question without dataset identifier"}], self.run_dir)
+        self.assertEqual(row["id"], "1")
         self.assertEqual(row["status"], "error")
         self.assertIsNone(row["answer"])
         self.assertNotIn("trajectory", row)

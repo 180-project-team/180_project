@@ -14,13 +14,14 @@ python -m examples.diagnose_runner
 
 Пример использует настоящий `AgentRunner` и искусственный локальный агент.
 Модель, GPU, сетевые сервисы и дополнительные зависимости не нужны.
-В stdout выводится JSON с исходным `RunReport` и результатом диагностики.
+В stdout выводится JSON со списком записей Runner в поле `runner` и результатом
+диагностики в поле `diagnostics`.
 
 Пять сценариев демонстрируют обычный ответ, пустой ответ, исключение агента,
 ошибку инструмента при успешном завершении и повтор поиска. Ожидаемый результат:
 5 проанализированных задач, 3 задачи с наблюдаемыми ошибками и 1 предупреждение
-о повторе поиска. `RunReport.failed_count` равен 1: он считает только ошибки
-выполнения, а диагностика также обнаруживает нарушения в успешных запусках.
+о повторе поиска. У одной записи Runner статус `error`. Диагностика также
+обнаруживает нарушения в записях со статусом `ok`.
 
 ## Вызов из Orchestrator
 
@@ -30,21 +31,19 @@ from dataclasses import asdict
 
 from app.diagnostics import diagnose
 
-# run_report уже получен вызовом AgentRunner.run(...).
+# Runner, вопросы, каталог и идентификатор запуска предоставляет вызывающая сторона.
+rows = runner.run(questions, run_dir)
 batch = diagnose(
-    run_report.load_results(),
-    run_id=run_report.run_id,
+    rows,
+    run_id=run_id,
     version_id="agent-v1",
 )
 serialized = json.dumps(asdict(batch), ensure_ascii=False)
 ```
 
-Runner сохраняет записи в `results.jsonl` внутри `run_report.run_dir`. Метод
-`load_results()` читает этот файл. Пример использует каталог `runs/`.
-
-Diagnostics получает уже сохранённые результаты. Он не запускает агента,
-не рассчитывает метрики, не изменяет код и не принимает решение об оптимизации.
-Сохранение отчётов и исходных результатов организует вызывающая сторона.
+`AgentRunner.run()` возвращает итератор записей. `diagnose()` обрабатывает записи
+по мере поступления. За сохранение результатов Runner и отчётов Diagnostics
+отвечает вызывающая сторона.
 
 ## Входной контракт
 
@@ -84,8 +83,8 @@ diagnose(
 ) -> DiagnosisBatchResult
 ```
 
-- `results` — непосредственно `RunReport.load_results()` или другая последовательность
-  совместимых отображений. Для каждой записи создаётся один отчёт в исходном порядке.
+- `results` — итератор из `AgentRunner.run()` или другой итерируемый набор совместимых
+  отображений. Для каждой записи создаётся один отчёт в исходном порядке.
 - `id` переносится в `case_id` без преобразования. Допустимы `str`, `int`, `None`;
   отсутствующий идентификатор остаётся `None`. Runner сам преобразует свои ID в строки
   и создаёт их при отсутствии в заданиях; Diagnostics сохраняет уже полученное значение.
@@ -187,10 +186,11 @@ Jev использует OpenRouter Decisions API. Для модели с под
 
 ### Свидетельства и шаги
 
-`EvidenceRef.path` — путь относительно соответствующего исходного результата:
+`EvidenceRef.path` — путь относительно соответствующего исходного результата.
+Если исходные результаты сохранены в списке `rows`, значение можно получить так:
 
 ```python
-value = run_report.load_results()[report_index]
+value = rows[report_index]
 for part in batch.reports[report_index].evidence_refs[0].path:
     value = value[part]
 ```
@@ -263,7 +263,7 @@ for part in batch.reports[report_index].evidence_refs[0].path:
 
 ```python
 batch = diagnose(
-    run_report.load_results(),
+    runner.run(questions, run_dir),
     answer_validator=lambda answer: (
         isinstance(answer, list) and all(isinstance(item, str) for item in answer)
     ),

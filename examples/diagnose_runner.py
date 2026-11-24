@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from app.diagnostics import DiagnosisBatchResult, diagnose
-from app.runner import AgentRunner, CallableAdapter, RunReport
+from app.runner import AgentRunner, CallableAdapter
 
 
 class DemoAgent:
@@ -43,19 +43,19 @@ class DemoAgent:
         return {"answer": "42"}
 
 
-def run_example(*, runs_root: str | Path = "runs") -> tuple[RunReport, DiagnosisBatchResult]:
+def run_example(*, run_dir: str | Path = ".") -> tuple[list[dict[str, Any]], DiagnosisBatchResult]:
     questions = [{"id": name, "question": name} for name in (
         "normal", "empty", "runtime_error", "tool_error", "repeated_search",
     )]
-    run_report = AgentRunner(lambda: CallableAdapter(DemoAgent), runs_root=runs_root).run(questions)
-    batch = diagnose(run_report.load_results(), run_id=run_report.run_id, version_id="demo-v1")
-    return run_report, batch
+    runner = AgentRunner(lambda _: CallableAdapter(DemoAgent))
+    rows = list(runner.run(questions, run_dir))
+    batch = diagnose(rows, run_id="demo-run", version_id="demo-v1")
+    return rows, batch
 
 
 def main() -> None:
-    run_report, batch = run_example()
-    runner = {**asdict(run_report), "run_dir": str(run_report.run_dir)}
-    print(json.dumps({"runner": runner, "diagnostics": asdict(batch)}, ensure_ascii=False, indent=2))
+    rows, batch = run_example()
+    print(json.dumps({"runner": rows, "diagnostics": asdict(batch)}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
