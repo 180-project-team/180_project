@@ -106,7 +106,6 @@ class Hypothesis:
 class ClassifierAttempt:
     status: str
     cost_usd: float | None = None
-    probabilities: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

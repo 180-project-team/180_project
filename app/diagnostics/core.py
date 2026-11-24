@@ -40,7 +40,7 @@ def _classify_ambiguous_case(
     try:
         decision = classifier.classify(classifier_state(row, list(candidates.values())),
                                        tuple(candidates))
-        attempt = ClassifierAttempt("abstained", decision.cost_usd, decision.probabilities)
+        attempt = ClassifierAttempt("abstained", decision.cost_usd)
         if decision.failure_type == FailureType.UNKNOWN:
             return attempt
         if decision.failure_type not in candidates:

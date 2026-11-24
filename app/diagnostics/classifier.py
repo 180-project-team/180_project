@@ -1,4 +1,4 @@
-"""Optional decision backends for cases that rules cannot attribute."""
+"""Optional classification for cases that rules cannot attribute."""
 
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ _CRITERIA = {
 class Classification:
     failure_type: FailureType
     cost_usd: float | None = None
-    probabilities: dict[str, float] = field(default_factory=dict)
 
 
 class FailureClassifier(Protocol):
@@ -58,43 +57,7 @@ def _cost(response: Mapping[str, Any]) -> float | None:
     return cost
 
 
-@dataclass(frozen=True)
-class JevClassifier:
-    api_key: str = field(repr=False)
-    model: str = "typesafe/jev-1.14"
-    endpoint: str = "https://openrouter.ai/api/alpha/decisions"
-    min_confidence: float = 0.8
-    timeout: float = 15
-
-    def __post_init__(self) -> None:
-        if not self.api_key or not 0 <= self.min_confidence <= 1:
-            raise ValueError("Jev requires an API key and a confidence threshold in [0, 1]")
-
-    def classify(
-        self, state: Mapping[str, Any], candidates: tuple[FailureType, ...],
-    ) -> Classification:
-        criteria = _criteria(candidates)
-        response = _post_json(self.endpoint, self.api_key, {
-            "model": self.model,
-            "state": dict(state),
-            "questions": {
-                "failure": {"type": "choice", "instructions": _INSTRUCTIONS, "criteria": criteria},
-            },
-        }, self.timeout)
-        answer = response["answers"]["failure"]
-        label, confidence = answer["choice"], answer["confidence"]
-        probabilities = answer["probabilities"]
-        if (answer.get("type") != "choice" or not isinstance(label, str) or label not in criteria
-                or not _probability(confidence)
-                or not isinstance(probabilities, dict)
-                or probabilities.keys() != criteria.keys()
-                or not all(_probability(value) for value in probabilities.values())):
-            raise ValueError("Invalid Decisions API choice")
-        category = FailureType(label) if confidence >= self.min_confidence else FailureType.UNKNOWN
-        return Classification(category, _cost(response), probabilities)
-
-
-def _probability(value: Any) -> bool:
+def _is_unit_score(value: Any) -> bool:
     return type(value) in (int, float) and 0 <= value <= 1
 
 
@@ -171,7 +134,7 @@ def classifier_state(
             name: metrics[name] for name in (
                 "answer_em", "answer_f1", "fact_recall", "retrieval_fact_recall",
                 "faithfulness", "final_context_fact_recall",
-            ) if _probability(metrics.get(name))
+            ) if _is_unit_score(metrics.get(name))
         },
         "reference_document_ids": _ids(row.get("reference_document_ids")),
         "trace": excerpts,

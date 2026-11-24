@@ -125,26 +125,23 @@ uv run --locked python -m examples.diagnose_skim path/to/rows.jsonl
 
 ### Опциональная классификация через API
 
+`ChatClassifier` работает с OpenAI-совместимым Chat Completions API,
+поддерживающим JSON Schema.
+
 ```python
-import os
+from app.diagnostics import ChatClassifier, diagnose_case, skim_case
 
-from app.diagnostics import JevClassifier, diagnose_case, skim_case
-
-classifier = JevClassifier(api_key=os.environ["OPENROUTER_API_KEY"])
+classifier = ChatClassifier(base_url="http://127.0.0.1:8000/v1", model="local-model")
 report = diagnose_case(skim_case(row), classifier=classifier)
 ```
 
-Jev использует OpenRouter Decisions API. Для модели с поддержкой JSON Schema
-в OpenAI-совместимом Chat Completions используйте
-`ChatClassifier(base_url=..., model=..., api_key=...)`.
 Без явно переданного классификатора все проверки выполняются локально.
 
 Для вызова API нужны низкая метрика и несколько кандидатов, подкреплённых
 локальными сигналами. Провайдер получает вопрос, ответ, численные метрики
 и ограниченные фрагменты релевантных шагов. Модель выбирает категорию из списка,
 включая `UNKNOWN`. Свидетельства и гипотезы подбирает код. Таймаут и некорректный
-ответ сохраняют локальный вывод. Порог `min_confidence` Jev настраивается.
-Начальное значение 0.8 предназначено для сравнения на размеченных кейсах.
+ответ сохраняют локальный вывод.
 
 ## Выходной контракт
 
@@ -166,7 +163,7 @@ Jev использует OpenRouter Decisions API. Для модели с под
 | `suggested_scope` | Подсказка области проверки: `PROMPT`, `STRUCTURAL`, `CODE`, `UNKNOWN` |
 | `signals` | Все полученные сигналы, включая предупреждения |
 | `hypotheses` | Гипотезы для основной категории с полями `hypothesis_id`, `scope`, `advice` |
-| `classifier_attempt` | Статус вызова API, стоимость и вероятности, если их сообщил провайдер |
+| `classifier_attempt` | Статус вызова классификатора и стоимость, если её сообщил сервис |
 
 | Статус | Условие |
 | --- | --- |
@@ -325,9 +322,10 @@ python -m unittest discover -s tests -v
 uv run --locked python -m examples.compare_skim_diagnostics tests/fixtures/skim_diagnostic_cases.jsonl
 ```
 
-Для сравнения с Jev задайте `OPENROUTER_API_KEY` и добавьте `--jev`.
-Порог можно задать через `--min-confidence`. Команда сообщает точность флагов и
-размеченных критических шагов, долю неопределённых результатов, частоту вызовов
-и стоимость из ответов API. Для измерений на реальных данных каждая JSONL-строка
+Команда сообщает точность категорий и критических шагов, а также долю
+неопределённых результатов. Для сравнения правил с гибридным режимом передайте
+классификатор в `compare(cases, classifier=...)`. В гибридном режиме сводка также
+учитывает частоту вызовов и стоимость, если её сообщил сервис.
+Для измерений на реальных данных каждая JSONL-строка
 должна содержать `row` с записью Skim или `case` с объектом входного контракта,
 а также размеченные `failure_type` и, если известен проблемный шаг, `critical_step`.

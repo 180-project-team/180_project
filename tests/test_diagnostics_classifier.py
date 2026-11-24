@@ -1,10 +1,11 @@
 """Rule gating and HTTP response validation for diagnostic classifiers."""
 
 import unittest
+from dataclasses import asdict
 from unittest.mock import Mock, patch
 
 from app.diagnostics import (
-    ChatClassifier, Classification, DiagnosisStatus, FailureType, JevClassifier,
+    ChatClassifier, Classification, DiagnosisStatus, FailureType,
     diagnose_case, skim_case,
 )
 
@@ -44,10 +45,14 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(report.failure_type, FailureType.PREMATURE_STOP)
         classifier.classify.assert_called_once()
 
-    def test_backend_failures_and_out_of_set_labels_preserve_local_report(self):
+    def test_abstention_and_backend_failures_preserve_local_report(self):
         case = ambiguity_case()
         baseline = diagnose_case(case)
-        for result in (TimeoutError(), Classification(FailureType.CITATION_ERROR)):
+        for result, expected_status in (
+            (Classification(FailureType.UNKNOWN), "abstained"),
+            (TimeoutError(), "unavailable"),
+            (Classification(FailureType.CITATION_ERROR), "unavailable"),
+        ):
             with self.subTest(result=result):
                 classifier = Mock()
                 if isinstance(result, Exception):
@@ -56,38 +61,19 @@ class ClassifierTests(unittest.TestCase):
                     classifier.classify.return_value = result
                 report = diagnose_case(case, classifier=classifier)
                 self.assertEqual(report.status, DiagnosisStatus.FAILURE_FOUND)
-                self.assertEqual(report.classifier_attempt.status, "unavailable")
+                self.assertEqual(report.classifier_attempt.status, expected_status)
                 report.classifier_attempt = None
                 self.assertEqual(report, baseline)
-
-    @patch("app.diagnostics.classifier._post_json")
-    def test_jev_choice_and_cost_are_parsed_and_threshold_can_abstain(self, post):
-        post.return_value = {
-            "answers": {"failure": {"type": "choice", "choice": "INCOMPLETE_ANSWER",
-                                    "confidence": 0.75, "probabilities": {
-                                        "INCOMPLETE_ANSWER": 0.75,
-                                        "TOOL_OUTPUT_MISINTERPRETATION": 0.2, "UNKNOWN": 0.05,
-                                    }}},
-            "usage": {"cost": 0.0001},
-        }
-        report = diagnose_case(ambiguity_case(), classifier=JevClassifier("test"))
-        self.assertEqual(report.failure_type, FailureType.UNKNOWN)
-        self.assertEqual(report.classifier_attempt.status, "abstained")
-        self.assertEqual(report.classifier_attempt.cost_usd, 0.0001)
-        self.assertEqual(report.classifier_attempt.probabilities["INCOMPLETE_ANSWER"], 0.75)
-        endpoint, _, payload, _ = post.call_args.args
-        self.assertTrue(endpoint.endswith("/api/alpha/decisions"))
-        self.assertEqual(set(payload["questions"]["failure"]["criteria"]), {
-            "INCOMPLETE_ANSWER", "TOOL_OUTPUT_MISINTERPRETATION", "UNKNOWN",
-        })
 
     @patch("app.diagnostics.classifier._post_json")
     def test_chat_requests_strict_schema_and_validates_output(self, post):
         post.return_value = {
             "choices": [{"message": {"content": '{"failure_type":"TOOL_OUTPUT_MISINTERPRETATION"}'}}],
+            "usage": {"cost": 0.002},
         }
         report = diagnose_case(ambiguity_case(), classifier=ChatClassifier("https://example.com/v1", "test"))
         self.assertEqual(report.failure_type, FailureType.TOOL_OUTPUT_MISINTERPRETATION)
+        self.assertEqual(asdict(report.classifier_attempt), {"status": "accepted", "cost_usd": 0.002})
         endpoint, _, payload, _ = post.call_args.args
         self.assertEqual(endpoint, "https://example.com/v1/chat/completions")
         self.assertTrue(payload["response_format"]["json_schema"]["strict"])

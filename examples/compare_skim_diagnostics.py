@@ -2,13 +2,12 @@
 
 import argparse
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from app.diagnostics import (
-    DiagnosisReport, DiagnosisStatus, FailureClassifier, FailureType, JevClassifier,
+    DiagnosisReport, DiagnosisStatus, FailureClassifier, FailureType,
     diagnose_case, skim_case,
 )
 
@@ -86,20 +85,9 @@ def compare(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("cases", type=Path, help="JSONL file with labeled Skim Search episodes")
-    parser.add_argument("--jev", action="store_true", help="Also compare rules plus Jev")
-    parser.add_argument("--min-confidence", type=float, default=0.8)
     args = parser.parse_args()
-    classifier = None
-    if args.jev:
-        key = os.environ.get("OPENROUTER_API_KEY")
-        if not key:
-            parser.error("--jev requires OPENROUTER_API_KEY")
-        try:
-            classifier = JevClassifier(key, min_confidence=args.min_confidence)
-        except ValueError as exc:
-            parser.error(str(exc))
     with args.cases.open(encoding="utf-8") as source:
-        result = compare((json.loads(line) for line in source if line.strip()), classifier)
+        result = compare(json.loads(line) for line in source if line.strip())
     print(json.dumps(result, indent=2))
 
 
