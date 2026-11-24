@@ -1,0 +1,4 @@
+id,status,fact_recall,fact_precision,retrieval_fact_recall,faithfulness,duration_ms,tool_calls_count,successful_tool_calls_count,failed_tool_calls_count
+q001,ok,1.0,1.0,1.0,1.0,2310.5,2,2,0
+q002,ok,1.0,1.0,1.0,1.0,2260.0,2,2,0
+q003,ok,1.0,1.0,1.0,1.0,1980.0,2,1,1

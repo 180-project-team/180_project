@@ -48,7 +48,6 @@ def load_questions(path: str | Path, *, limit: int | None = None) -> list[dict[s
 
 
 def load_hf_questions(dataset_name: str, split: str, *, limit: int | None = None) -> list[dict[str, Any]]:
-    """Optional dependency; loads MADQA or compatible HF datasets on demand."""
     try:
         from datasets import load_dataset
     except ImportError as exc:

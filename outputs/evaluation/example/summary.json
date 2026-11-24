@@ -1,0 +1,13 @@
+{
+  "total_questions": 3,
+  "successful_questions": 3,
+  "failed_questions": 0,
+  "fact_recall": {"mean": 1.0, "count": 3},
+  "fact_precision": {"mean": 1.0, "count": 3},
+  "retrieval_fact_recall": {"mean": 1.0, "count": 3},
+  "faithfulness": {"mean": 1.0, "count": 3},
+  "duration_ms": {"mean": 2183.5, "count": 3},
+  "tool_calls_count": {"mean": 2.0, "count": 3},
+  "successful_tool_calls_count": {"mean": 1.6666666666666667, "count": 3},
+  "failed_tool_calls_count": {"mean": 0.3333333333333333, "count": 3}
+}
