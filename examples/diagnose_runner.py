@@ -1,6 +1,7 @@
-"""Run synthetic scenarios through Runner and Diagnostics without services.
+"""Demonstrate the in-memory diagnose() interface with AgentRunner.
 
-From the repository root: python -m examples.diagnose_runner
+Run `uv run --locked python -m examples.diagnose_runner` from the repository root.
+The demo prints synthetic Runner results and their diagnoses as JSON.
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ class DemoAgent:
                 "trajectory": [{
                     "action": "bm25_search",
                     "args": {"query": "revenue"},
-                    "query": "revenue",
                     "observation": "ERROR: Synthetic tool timeout",
                 }],
             }
@@ -36,7 +36,7 @@ class DemoAgent:
             return {
                 "answer": "42",
                 "trajectory": [
-                    {"action": "bm25_search", "query": "revenue", "observation": "(0 matches)"}
+                    {"action": "bm25_search", "args": {"query": "revenue"}, "observation": "(0 matches)"}
                     for _ in range(2)
                 ],
             }

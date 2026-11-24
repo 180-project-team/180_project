@@ -1,4 +1,4 @@
-"""Compare diagnostic categories and steps with labeled Runner cases."""
+"""Compare diagnoses with labels for joined Runner and Evaluator cases."""
 
 import argparse
 import json
@@ -67,6 +67,7 @@ class Score:
 def compare(
     cases: Iterable[dict], classifier: FailureClassifier | None = None,
 ) -> dict:
+    """Run local rules and optionally compare them with a supplied classifier."""
     rules = Score()
     hybrid = Score()
     for labeled in cases:
@@ -84,7 +85,7 @@ def compare(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("cases", type=Path, help="JSONL file with labeled Runner cases and Evaluator scores")
+    parser.add_argument("cases", type=Path, help="JSONL with case, failure_type and optional critical_step")
     args = parser.parse_args()
     with args.cases.open(encoding="utf-8") as source:
         result = compare(json.loads(line) for line in source if line.strip())
