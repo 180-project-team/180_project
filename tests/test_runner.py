@@ -8,7 +8,6 @@ import unittest
 from pathlib import Path
 
 from app.runner import AgentRunner, CallableAdapter, SubprocessJSONLAdapter, load_questions
-from app.runner.adapters.madqa import MADQAAdapter
 
 ROOT = Path(__file__).resolve().parents[1]
 ECHO = ROOT / "examples" / "echo_agent.py"
@@ -126,42 +125,12 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "non-JSON"):
             self.run_batch([{"question": "hi"}], lambda: SubprocessJSONLAdapter([sys.executable, "-u", "-c", code], startup_timeout=3))
 
-    def test_madqa_adapter_with_stubbed_upstream_module(self):
-        root = Path(self.temp.name)
-        (root / "utils.py").write_text(
-            "class WhooshSearchEngine:\n"
-            "    def __init__(self, source): self.source = source\n", encoding="utf-8")
-        (root / "vllm_agent.py").write_text(
-            "from utils import WhooshSearchEngine\n"
-            "class VLLMSearchAgent:\n"
-            "    def __init__(self, engine, model, base_url, api_key): self.engine = engine\n"
-            "    def answer_question(self, question, max_iterations, top_k):\n"
-            "        print('ordinary debug log should NOT break stdout JSON protocol')\n"
-            "        return {'answer':[question.upper()], 'citations':[], 'trajectory':[], 'iterations':1}\n",
-            encoding="utf-8")
-        (root / "ocr.jsonl").write_text("{}\n", encoding="utf-8")
-        adapter = MADQAAdapter(agent_dir=root, ocr_file="ocr.jsonl", model="stub", startup_timeout=3)
-        rows = self.run_batch([{"question": "hello", "answer_variants": [["HELLO"]]}], lambda: adapter)
-        self.assertEqual(rows[0]["answer"], ["HELLO"])
-        self.assertEqual(rows[0]["iterations"], 1)
-        self.assertEqual(rows[0]["status"], "ok")
-        self.assertIsNone(adapter.process)
-
-    def test_madqa_validates_settings_without_madqa_dependency(self):
-        with self.assertRaises(ValueError):
-            MADQAAdapter(agent_dir=self.temp.name, model="m", top_k=0)
-
-    def test_madqa_missing_repo_fails_cleanly(self):
-        adapter = MADQAAdapter(agent_dir=self.temp.name, model="m", startup_timeout=3)
-        with self.assertRaisesRegex(RuntimeError, "MADQA files"):
-            self.run_batch([{"question": "hi"}], lambda: adapter)
-        self.assertIsNone(adapter.process)
 
     def test_app_module_cli_end_to_end(self):
         proc = subprocess.run([
             sys.executable, "-m", "app",
-            "--adapter", "jsonl",
-            "--agent-command", f'"{sys.executable}" -u "{ECHO}"',
+            "--agent-command", f'"{sys.executable}" -u "{ECHO.name}"',
+            "--agent-cwd", str(ECHO.parent),
             "--questions", str(ROOT / "examples" / "questions.jsonl"),
             "--run-dir", str(self.runs),
         ], cwd=ROOT, text=True, capture_output=True, timeout=10)
