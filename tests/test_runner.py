@@ -1,11 +1,13 @@
 """Batch execution and adapter tests."""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from textwrap import dedent
 
 from app.runner import AgentRunner, CallableAdapter, SubprocessJSONLAdapter, load_questions
 
@@ -66,9 +68,18 @@ class RunnerTests(unittest.TestCase):
         class Broken(FakeAgent):
             def start(self):
                 raise RuntimeError("bad startup")
+        self.runs.mkdir()
+        results_path = self.runs / "results.jsonl"
+        results_path.write_text('{"id":"previous"}\n', encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "bad startup"):
-            self.run_batch([{"question": "q"}], lambda: CallableAdapter(lambda: Broken(self.events)))
+            self.run_batch(
+                [{"question": "q"}],
+                lambda: CallableAdapter(lambda: Broken(self.events)),
+                results_path=results_path,
+            )
         self.assertEqual(self.events, ["stop"])
+        self.assertEqual(results_path.read_text(encoding="utf-8"), '{"id":"previous"}\n')
+        self.assertEqual(list(self.runs.iterdir()), [results_path])
 
     def test_validation_and_empty_batch(self):
         with self.assertRaises(ValueError):
@@ -80,6 +91,16 @@ class RunnerTests(unittest.TestCase):
         rows = self.run_batch([{"question": "bad"}, {"question": "good"}], continue_on_error=False)
         self.assertEqual([r["status"] for r in rows], ["error"])
         self.assertEqual(self.events[-1], "stop")
+
+    def test_results_path_contains_exactly_the_rows_from_the_last_completed_run(self):
+        path = self.runs / "nested" / "agent.jsonl"
+        questions = [{"question": "Кто?", "reference_answer": "Test"}, {"question": "bad"}]
+        for _ in range(2):
+            rows = self.run_batch(questions, results_path=path)
+            written = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(written, rows)
+        self.assertEqual([row["status"] for row in written], ["ok", "error"])
+        self.assertIn("question failure", written[1]["error"])
 
     def test_direct_string_response(self):
         class Simple:
@@ -140,6 +161,57 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(rows)
         self.assertEqual(rows[0]["answer"], rows[0]["question"].upper())
         self.assertEqual(len(rows), 2)
+
+    def test_skim_cli_preserves_native_trajectory_and_reuses_index(self):
+        temp_dir = Path(self.temp.name)
+        corpus_path = temp_dir / "corpus.jsonl"
+        corpus_path.write_text('{"docid":"doc1","text":"Документ"}\n', encoding="utf-8")
+        (temp_dir / "agent_search.py").write_text(dedent('''\
+            import os
+
+            def as_units(docs):
+                assert docs[0]["doc_id"] == "doc1"
+                return docs
+
+            class Agent:
+                def index(self, units):
+                    assert not hasattr(self, "calls")
+                    self.calls = 0
+
+                def search(self, question, k):
+                    self.calls += 1
+                    self.last_trajectory_meta = {
+                        "final_answer": f"{self.calls}: {question}",
+                        "trajectory": [{"action": "search_s", "args": {"query": question},
+                                        "observation": "Document content"}],
+                        "stopped": "answer",
+                    }
+                    return ["doc1"]
+
+            def build_agent(strategy, **options):
+                assert strategy == "sieve_bm25"
+                assert options["model"] == "local-test"
+                os.write(1, b"Skim diagnostic message\\n")
+                return Agent()
+            '''), encoding="utf-8")
+        results_path = temp_dir / "results" / "runner_results.jsonl"
+        proc = subprocess.run([
+            sys.executable, "-m", "app", "--adapter", "skim",
+            "--skim-python", sys.executable, "--skim-model", "local-test",
+            "--skim-corpus", str(corpus_path),
+            "--questions", str(ROOT / "examples" / "questions.jsonl"),
+            "--run-dir", str(self.runs), "--results-path", str(results_path),
+        ], cwd=ROOT, env={**os.environ, "PYTHONPATH": str(temp_dir)},
+            text=True, capture_output=True, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rows = [json.loads(line) for line in results_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(rows, [json.loads(line) for line in proc.stdout.splitlines()])
+        self.assertEqual([row["answer"].split(":", 1)[0] for row in rows], ["1", "2"])
+        self.assertEqual(rows[0]["trajectory"], [
+            {"action": "search_s", "args": {"query": rows[0]["question"]}, "observation": "Document content"},
+        ])
+        self.assertEqual(rows[0]["ranking"], ["doc1"])
+        self.assertEqual(rows[0]["stopped"], "answer")
 
     def test_question_loading(self):
         inp = Path(self.temp.name) / "questions.jsonl"

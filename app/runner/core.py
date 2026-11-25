@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
+import json
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Mapping
+from tempfile import NamedTemporaryFile
+from typing import Any, Callable, Iterable, Iterator, Mapping, TextIO
 
 from .adapters.base import AgentAdapter
+
+
+@contextmanager
+def _open_results(path: Path) -> Iterator[TextIO]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    output = NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False)
+    temporary_path = Path(output.name)
+    try:
+        with output:
+            yield output
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def prepare_questions(questions: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -29,13 +44,15 @@ class AgentRunner:
         questions: Iterable[Mapping[str, Any]],
         run_dir: str | Path,
         *,
+        results_path: str | Path | None = None,
         continue_on_error: bool = True,
     ) -> Iterator[dict[str, Any]]:
-        """Yield each result; run_dir is the directory supplied by the caller."""
+        """Yield rows and publish the supplied JSONL path when the iterator is exhausted."""
         rows = prepare_questions(questions)
-        if not rows:
-            return
-        with ExitStack() as resources:
+        output = _open_results(Path(results_path).absolute()) if results_path is not None else nullcontext()
+        with output as stream, ExitStack() as resources:
+            if not rows:
+                return
             adapter = self._factory(Path(run_dir))
             resources.callback(adapter.stop)
             adapter.start()
@@ -62,6 +79,8 @@ class AgentRunner:
                     result["status"] = "error"
                     result["error"] = f"{type(exc).__name__}: {exc}"
                 result["duration_ms"] = round((time.monotonic() - begin) * 1000, 2)
+                if stream is not None:
+                    stream.write(json.dumps(result, ensure_ascii=False, default=str) + "\n")
                 yield result
                 if result["status"] == "error" and not continue_on_error:
                     break

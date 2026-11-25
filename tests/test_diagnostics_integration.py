@@ -16,6 +16,7 @@ from app.diagnostics import (
 from app.llm import LLMService
 from app.runner import AgentRunner, CallableAdapter
 from examples.diagnose_runner import run_example
+from examples.orchestrator_demo import ExampleOrchestrator
 
 
 _FACTS = ["Alice directed the first film.", "Bob directed the second film."]
@@ -167,9 +168,7 @@ class DiagnosticsIntegrationTests(unittest.TestCase):
         runner = AgentRunner(lambda _: CallableAdapter(PipelineAgent))
         evaluator = Evaluator(LLMService(model="offline-integration-test"))
         with chdir(caller_dir):
-            with runner_path.open("w", encoding="utf-8") as stream:
-                for row in runner.run(questions, root):
-                    stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+            ExampleOrchestrator(runner).execute(questions, root, results_path=runner_path)
             original_runner = runner_path.read_bytes()
             with patch.object(InstructorLLM, "agenerate", autospec=True, side_effect=generate_judgment) as judge:
                 with self.assertLogs("app.evaluator.metrics", level="ERROR") as logs:

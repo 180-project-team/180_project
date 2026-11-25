@@ -38,6 +38,41 @@ uv run --locked python -m examples.diagnose_runner
 Для загрузки вопросов напрямую из Hugging Face выполните
 `uv sync --locked --extra huggingface`.
 
+### Запуск SkimSearchAgent
+
+Для корпуса документов нужен JDK 21 или новее. Укажите `JAVA_HOME` и установите
+SkimSearchAgent из локального checkout в его окружение. Интеграция использует
+Python API `build_agent()` из SkimSearchAgent 0.3.0.
+
+```shell
+uv venv --python 3.12 ../skim-search-agent/.venv
+uv pip install --python ../skim-search-agent/.venv/bin/python -e '../skim-search-agent[api,retrieval]'
+```
+
+Подготовьте `corpus.jsonl` с одним документом на строку, например
+`{"id":"python","title":"Python","text":"Python was created by Guido van Rossum."}`.
+Вопросы передаются отдельно. В примере модель `qwen3:4b` уже доступна по указанному OpenAI-совместимому адресу.
+
+```shell
+uv run --locked python -m app --adapter skim \
+  --skim-python ../skim-search-agent/.venv/bin/python \
+  --skim-corpus corpus.jsonl --skim-model qwen3:4b \
+  --skim-api-base http://127.0.0.1:11434/v1 \
+  --questions data/evaluation_dataset.jsonl --limit 2 \
+  --run-dir runs/skim --results-path runs/skim/runner_results.jsonl
+```
+
+По умолчанию адаптер использует стратегию `sieve_bm25` и готовит индекс в
+`<run-dir>/skim_indexes` один раз на пакет. Для проверки запуска можно опустить
+`--skim-model`, чтобы использовать тестовую политику SkimSearchAgent.
+
+В Python оркестратор передаёт путь в `runner.run(questions, run_dir, results_path=...)`.
+Runner записывает по строке на вопрос и публикует готовый JSONL после полного
+обхода итератора. В [`examples/orchestrator_demo.py`](examples/orchestrator_demo.py)
+метод `execute()` завершает обход перед возвратом. Тот же путь можно передать в Evaluator и Diagnostics.
+
+### Результаты запуска
+
 Система запускает агента на подготовленных задачах и сохраняет:
 
 - итоговые ответы;
