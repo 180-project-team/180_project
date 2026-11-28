@@ -1,8 +1,10 @@
 """Prompt optimizer unit and end-to-end tests; no external model required."""
 
 import json
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from app.prompt_optimizer import (
@@ -12,6 +14,18 @@ from app.prompt_optimizer import (
 )
 from app.prompt_optimizer.evaluation_report import EvaluationItem, EvaluationReport
 from app.prompt_optimizer.models import PromptLesson
+
+
+class FixturePromptGenerator:
+    def generate(self, state, lesson):
+        component = state.get(lesson.component_id)
+        return PromptPatch(
+            component_id=lesson.component_id, operation="APPEND_RULE",
+            before_hash=digest(component.template),
+            payload="Verify the final answer against available information.",
+            rationale="Follow the supplied advice.", evidence_refs=lesson.evidence_refs,
+            rule_id="verify_answer",
+        )
 
 class PromptModelTests(unittest.TestCase):
     def setUp(self):
@@ -97,23 +111,24 @@ class PromptModelTests(unittest.TestCase):
 
 class ProposalTests(unittest.TestCase):
     def setUp(self):
-        from examples.prompt_optimizer_example import demo_diagnosis
-
         self.state = PromptState((
             PromptComponent("system.core", "system", "Answer the question."),
             PromptComponent("verifier.instructions", "system", "Check your answer."),
             PromptComponent("policy.safety", "system", "Keep data private", editable=False),
         ))
-        self.diagnosis = demo_diagnosis("run-1", "q1")
+        self.diagnosis = {
+            "run_id": "run-1", "case_id": "q1", "status": "FAILURE_FOUND",
+            "failure_type": "UNSUPPORTED_ANSWER", "suggested_scope": "PROMPT",
+            "hypotheses": [{"hypothesis_id": "verify_answer", "scope": "PROMPT", "advice": "Verify the final answer."}],
+            "evidence_refs": [{"path": ["trajectory", 0]}],
+        }
 
     def test_uses_existing_diagnosis_to_choose_an_editable_component(self):
-        from examples.prompt_optimizer_example import make_generator
-
         self.diagnosis["signals"] = [{
             "failure_type": "UNSUPPORTED_ANSWER",
             "component_id": "verifier.instructions",
         }]
-        candidate, patch = propose_candidate(self.state, self.diagnosis, make_generator())
+        candidate, patch = propose_candidate(self.state, self.diagnosis, FixturePromptGenerator())
         self.assertEqual(patch.component_id, "verifier.instructions")
         self.assertEqual(patch.evidence_refs, ("run-1#q1:trajectory.0",))
         self.assertEqual(candidate.parent_id, self.state.prompt_version_id)
@@ -126,7 +141,21 @@ class ProposalTests(unittest.TestCase):
                 raise AssertionError("A structural diagnosis should not invoke the prompt generator")
 
         self.diagnosis["suggested_scope"] = "STRUCTURAL"
+        self.diagnosis["hypotheses"] = [{
+            "hypothesis_id": "retry_tool", "scope": "STRUCTURAL", "advice": "Retry the failed tool.",
+        }]
         self.assertIsNone(propose_candidate(self.state, self.diagnosis, UnusedGenerator()))
+
+    def test_uses_secondary_prompt_advice_unless_primary_scope_only_is_requested(self):
+        self.diagnosis["suggested_scope"] = "STRUCTURAL"
+        self.assertIsNotNone(propose_candidate(self.state, self.diagnosis, FixturePromptGenerator()))
+        self.assertIsNone(propose_candidate(self.state, self.diagnosis, FixturePromptGenerator(), primary_scope_only=True))
+
+    def test_skips_diagnostic_error_and_insufficient_data(self):
+        for status in ("DIAGNOSTIC_ERROR", "INSUFFICIENT_DATA"):
+            with self.subTest(status=status):
+                self.diagnosis["status"] = status
+                self.assertIsNone(propose_candidate(self.state, self.diagnosis, FixturePromptGenerator()))
 
     def test_rejects_no_op(self):
         class NoOpGenerator:
@@ -160,22 +189,18 @@ class ComparatorTests(unittest.TestCase):
 
 
 class EndToEndTests(unittest.TestCase):
-    def test_compares_prompt_versions_using_supplied_reports(self):
-        from examples.prompt_optimizer_example import DemoEvaluationHarness, demo_diagnosis, make_generator
+    def test_previous_demo_entry_point_uses_the_file_based_interface(self):
+        from examples.prompt_optimizer_example import main
 
-        state = PromptState((PromptComponent("system.core", "system", "Answer quickly."),))
-        validation = [{"id": "q1", "question": "3+3", "reference_answer": "6"}]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            harness = DemoEvaluationHarness()
-            before = harness.evaluate(state, validation, seed=42, split="validation", runs_root=root)
-            candidate, _ = propose_candidate(state, demo_diagnosis("training", "train-1"), make_generator())
-            after = harness.evaluate(candidate, validation, seed=42, split="validation", runs_root=root)
-
-            self.assertEqual([before.score, after.score], [0.0, 1.0])
-            self.assertTrue(SelectionPolicy().compare(before, after).accepted)
-            self.assertTrue((after.run_dir / "results.jsonl").is_file())
-            self.assertTrue((after.run_dir / "demo_evaluation.jsonl").is_file())
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--output", str(root)]), 0)
+            manifest = json.loads((root / "patch.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["status"], "proposed")
+            self.assertEqual(manifest["diagnosis_ref"]["case_id"], "demo-1")
+            self.assertTrue((root / "candidate_code.txt").is_file())
+            self.assertIsNotNone(manifest["patch"])
 
     def test_rejects_an_evaluator_report_for_another_question(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,37 +1,52 @@
-# Prompt optimizer 
+# Prompt optimizer
 
-The optimizer proposes a prompt change from a Diagnostics report and compares prompt versions using scores from the shared Evaluator.
+The L1 optimizer proposes a prompt-only patch from an existing Diagnostics report
+and an agent source snapshot. The caller runs the candidate through the shared
+Runner and Evaluator and decides whether to accept it.
 
-## Run the tests and demo
+## Environment and checks
 
-Run these commands from the repository root.
+From the repository root:
 
-```bash
-python3 -m unittest discover -s tests
-python3 -m examples.prompt_optimizer_example
+```shell
+uv sync --locked --python 3.12
+uv run --locked --python 3.12 python -m unittest discover -s tests -v
+uv run --locked --python 3.12 python -m examples.prompt_optimizer_interface
 ```
 
-The demo uses arithmetic questions, a sample diagnosis, and simulated scores. It saves the proposed prompt, the patch, and the selection decision to `runs/prompt_optimizer_demo/candidate.json`.
+The offline demo prepares a report using the team's Diagnostics and uses a fixed
+patch generator. It saves `patch.json`, `candidate_code.txt`, and `changes.diff`
+under `runs/prompt_optimizer_interface`. It checks artifact exchange without
+measuring a quality improvement. The previous `examples.prompt_optimizer_example`
+entry point runs this same demo.
 
-## Propose a change with your LLM
+## Use your running model
 
-Pass the current prompt state and a Diagnostics report as JSON files. Set `--base-url` to your running model server.
-
-```bash
-python3 -m app.prompt_optimizer \
-  --prompt-state path/to/prompt_state.json \
-  --diagnosis path/to/diagnosis.json \
-  --model qwen3:8b \
-  --base-url http://127.0.0.1:11434/v1 \
-  --output runs/prompt_optimizer/candidate.json
+```shell
+uv run --locked --python 3.12 python -m app.prompt_optimizer \
+  --diagnosis path/to/diagnoses.jsonl \
+  --output-dir runs/prompt_candidate \
+  --agent-code-file path/to/agent_snapshot.txt \
+  --model qwen3:8b --base-url http://127.0.0.1:11434/v1
 ```
 
-Set `LLM_API_KEY` if your server requires authentication. The command saves `prompt_state` and `patch`. Both fields are `null` when the report has no applicable prompt recommendation.
+The snapshot file contains the plain string with the agent structure and code.
+Alternatively pass that string via `--agent-code`. The CLI reads `LLM_API_KEY`
+unless another environment variable is selected with `--api-key-env`.
 
-## Call from the orchestrator
+## Use the orchestrator's shared client
 
-- `propose_candidate(state, diagnosis, generator)` returns a candidate prompt and patch for an applicable recommendation.
-- `load_evaluation_report(...)` joins saved Runner results and Evaluator scores by question ID.
-- `SelectionPolicy.compare(baseline, candidate)` uses Fact Recall to compare prompt versions on the same questions, with configurable limits on regressions and token usage.
+```python
+from app.prompt_optimizer import PromptOptimizer
 
-The orchestrator supplies the diagnosis and runs each prompt version through Runner and Evaluator. The agent adapter applies the corresponding prompt before each run.
+result = PromptOptimizer(llm_service).optimize(diagnosis_path, output_dir, agent_code)
+```
+
+The caller owns the shared client's lifecycle. `proposed` means a locally checked
+candidate requiring external evaluation. The optimizer does not execute the agent,
+calculate metrics, run diagnostics, or apply changes to its source files.
+
+The exact patch format, supported Python prompt literals, secondary hypotheses,
+and current integration limits are documented in
+[docs/prompt_optimizer.md](docs/prompt_optimizer.md) and
+[docs/prompt_optimizer_interface.md](docs/prompt_optimizer_interface.md).

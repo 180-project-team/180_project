@@ -7,7 +7,7 @@ import string
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .models import PromptState, digest
+from app.prompt_optimizer.models import PromptState, digest
 
 
 def placeholders(template: str) -> set[str]:

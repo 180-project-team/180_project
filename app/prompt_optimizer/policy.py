@@ -1,13 +1,13 @@
-"""Allowlisted prompt mutations and objective candidate selection."""
+"""Prompt guards and optional comparison of externally computed scores."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
-from .evaluation_report import EvaluationReport
-from .models import PromptComponent, PromptPatch, PromptState, digest
-from .renderer import PromptRenderer, placeholders
+from app.prompt_optimizer.evaluation_report import EvaluationReport
+from app.prompt_optimizer.models import PromptComponent, PromptPatch, PromptState, digest
+from app.prompt_optimizer.renderer import PromptRenderer, placeholders
 
 _RULE_RE = re.compile(r"^\s*- \[([A-Za-z0-9_.-]+)\] (.*)$")
 _SECRET_RE = re.compile(r"(?:github_pat_[A-Za-z0-9_]{10,}|gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,})")
@@ -100,8 +100,9 @@ class SelectionConfig:
 class SelectionDecision:
     accepted: bool
     reason: str
-    delta: float
-    regressions: int
+    delta: float | None
+    regressions: int | None
+    status: str = "compared"
 
 
 class SelectionPolicy:
@@ -109,13 +110,25 @@ class SelectionPolicy:
         self.config = config or SelectionConfig()
 
     def compare(self, parent: "EvaluationReport", candidate: "EvaluationReport") -> SelectionDecision:
+        """Compare complete saved measurements; do not infer missing scores."""
 
         if not isinstance(parent, EvaluationReport) or not isinstance(candidate, EvaluationReport):
             raise TypeError("SelectionPolicy requires evaluation reports")
         before = {row.task_id: row.score for row in parent.items}
         after = {row.task_id: row.score for row in candidate.items}
+        if len(before) != len(parent.items) or len(after) != len(candidate.items):
+            raise ValueError("Evaluation reports must not contain duplicate task ids")
+        if parent.split != candidate.split:
+            raise ValueError("Parent and candidate must use the same evaluation split")
         if not before or before.keys() != after.keys():
             raise ValueError("Parent and candidate must be evaluated on identical, non-empty tasks")
+        missing = sorted({row.task_id for report in (parent, candidate) for row in report.items
+                          if row.score is None or row.status != "ok"})
+        if missing:
+            return SelectionDecision(
+                False, "Insufficient evaluation data for tasks: " + ", ".join(missing),
+                None, None, status="insufficient_data",
+            )
         regressions = sum(after[task_id] < value - 1e-9 for task_id, value in before.items())
         delta = candidate.score - parent.score
         if delta < self.config.min_delta - 1e-9:

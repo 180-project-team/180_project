@@ -1,12 +1,15 @@
-"""Baseline -> diagnosis -> patch -> re-evaluation -> measured selection."""
+"""Generate a prompt candidate from the shared diagnostics report."""
+
+from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
-from .generator import PromptModelPort
-from .models import PromptLesson, PromptPatch, PromptState
-from .policy import PromptGuard
+from app.prompt_optimizer.diagnostic_report import prompt_hypotheses
+from app.prompt_optimizer.generator import PromptModelPort
+from app.prompt_optimizer.models import PromptLesson, PromptPatch, PromptState
+from app.prompt_optimizer.policy import PromptGuard
 
 if TYPE_CHECKING:
     from app.diagnostics.models import DiagnosisReport
@@ -18,25 +21,21 @@ def propose_candidate(
     generator: PromptModelPort,
     *,
     guard: PromptGuard | None = None,
+    primary_scope_only: bool = False,
 ) -> tuple[PromptState, PromptPatch] | None:
     """Apply one recommendation from the shared diagnostics report."""
     report = diagnosis if isinstance(diagnosis, Mapping) else asdict(diagnosis)
-    if report.get("suggested_scope") != "PROMPT":
-        return None
-
-    hypothesis = next(
-        (item for item in report["hypotheses"] if item["scope"] == "PROMPT" and item["advice"].strip()),
-        None,
-    )
+    hypothesis = next(iter(prompt_hypotheses(report, primary_scope_only=primary_scope_only)), None)
     editable_ids = [component.component_id for component in state.components if component.editable]
     if hypothesis is None or not editable_ids or not report["evidence_refs"]:
         return None
 
     matching_signals = (
-        signal for signal in report.get("signals", ()) if signal["failure_type"] == report["failure_type"]
+        signal for signal in report.get("signals", ())
+        if signal.get("failure_type") == report["failure_type"]
     )
     component_id = next(
-        (signal["component_id"] for signal in matching_signals if signal["component_id"] in editable_ids),
+        (signal["component_id"] for signal in matching_signals if signal.get("component_id") in editable_ids),
         None,
     )
     if component_id is None:
