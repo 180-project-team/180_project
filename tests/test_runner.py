@@ -1,15 +1,15 @@
-"""Runner tests: no model downloads, MADQA install or extra packages."""
+"""Batch execution and adapter tests."""
 
 import json
-import socket
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from textwrap import dedent
 
 from app.runner import AgentRunner, CallableAdapter, SubprocessJSONLAdapter, load_questions
-from app.runner.adapters.madqa import MADQAAdapter
 
 ROOT = Path(__file__).resolve().parents[1]
 ECHO = ROOT / "examples" / "echo_agent.py"
@@ -42,104 +42,72 @@ class RunnerTests(unittest.TestCase):
     def factory(self):
         return CallableAdapter(lambda: FakeAgent(self.events))
 
-    def runner(self, factory=None):
-        return AgentRunner(factory or self.factory, runs_root=self.runs)
+    def run_batch(self, questions, factory=None, **options):
+        runner = AgentRunner(lambda _: (factory or self.factory)())
+        return list(runner.run(questions, self.runs, **options))
 
-    def test_persists_separate_run_directory_with_all_artifacts(self):
-        report = self.runner().run([
-            {"id": "a", "question": "first", "answer_variants": [["FIRST"]], "evidence": ["doc"]},
-            {"question": "bad"},
-            {"id": "c", "question": "last"},
-        ], metadata={"prompt_version": "v1"})
-        self.assertEqual(report.status, "completed_with_errors")
-        self.assertEqual((report.processed_count, report.failed_count), (3, 1))
-        self.assertEqual(self.events, ["start", ("ask", "first"), ("ask", "bad"), ("ask", "last"), "stop"])
-        self.assertTrue((report.run_dir / "artifacts").is_dir())
-        self.assertTrue(report.events_path.exists())
-        self.assertEqual([json.loads(x) for x in report.questions_path.read_text().splitlines()][0]["question"], "first")
-        rows = report.load_results()
-        self.assertEqual(len(rows), 3)
-        self.assertEqual(rows[1]["id"], "2")
-        self.assertEqual(rows[0]["answer_variants"], [["FIRST"]])
+    def test_run_dir_and_results(self):
+        seen_dirs = []
+        def factory(run_dir):
+            seen_dirs.append(run_dir)
+            return self.factory()
+        rows = list(AgentRunner(factory).run([
+            {"question": "first", "answer": "gold", "evidence": ["doc"]},
+            {"question": "bad"}, {"question": "last"},
+        ], self.runs))
+        self.assertEqual(seen_dirs, [self.runs])
+        self.assertFalse(self.runs.exists())
+        self.assertEqual([r["status"] for r in rows], ["ok", "error", "ok"])
+        self.assertEqual(rows[0]["answer"], "FIRST")
         self.assertEqual(rows[0]["evidence"], ["doc"])
-        self.assertEqual(rows[1]["status"], "error")
-        meta = json.loads(report.metadata_path.read_text())
-        self.assertEqual(meta["status"], "completed_with_errors")
-        self.assertEqual(meta["metadata"], {"prompt_version": "v1"})
-        self.assertTrue(meta["finished_at"])
+        self.assertEqual(rows[0]["trajectory"], ["step"])
+        self.assertEqual(rows[1]["id"], "2")
+        self.assertEqual(self.events, ["start", ("ask", "first"), ("ask", "bad"), ("ask", "last"), "stop"])
 
-    def test_no_evaluator_or_llm_in_runner_contract(self):
-        report = self.runner().run([{"question": "yes"}])
-        self.assertEqual(report.load_results()[0]["answer"], "YES")
-        # In the project, an evaluator can receive the runner and invoke it.
-        class ExampleEvaluator:
-            def __init__(self, runner):
-                self.runner = runner
-            def evaluate(self):
-                return self.runner.run([{"question": "second"}]).run_dir
-        self.assertNotEqual(ExampleEvaluator(self.runner()).evaluate(), report.run_dir)
-
-    def test_stop_if_start_fails_and_keep_failed_folder(self):
+    def test_stop_if_start_fails(self):
         class Broken(FakeAgent):
             def start(self):
-                self.events.append("start")
                 raise RuntimeError("bad startup")
+        self.runs.mkdir()
+        results_path = self.runs / "results.jsonl"
+        results_path.write_text('{"id":"previous"}\n', encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "bad startup"):
-            self.runner(lambda: CallableAdapter(lambda: Broken(self.events))).run([{"question": "q"}])
-        self.assertEqual(self.events, ["start", "stop"])
-        folders = list(self.runs.iterdir())
-        self.assertEqual(len(folders), 1)
-        meta = json.loads((folders[0] / "metadata.json").read_text())
-        self.assertEqual(meta["status"], "failed")
-        self.assertIn("bad startup", meta["fatal_error"])
-        self.assertTrue((folders[0] / "questions.jsonl").exists())
-        self.assertTrue((folders[0] / "results.jsonl").exists())
+            self.run_batch(
+                [{"question": "q"}],
+                lambda: CallableAdapter(lambda: Broken(self.events)),
+                results_path=results_path,
+            )
+        self.assertEqual(self.events, ["stop"])
+        self.assertEqual(results_path.read_text(encoding="utf-8"), '{"id":"previous"}\n')
+        self.assertEqual(list(self.runs.iterdir()), [results_path])
 
-    def test_validates_before_creating_dir_or_start(self):
+    def test_validation_and_empty_batch(self):
         with self.assertRaises(ValueError):
-            self.runner().run([{"question": ""}])
-        self.assertFalse(self.runs.exists())
+            self.run_batch([{"question": "q"}, {"question": ""}])
+        self.assertEqual(self.run_batch([]), [])
         self.assertEqual(self.events, [])
 
-    def test_empty_batch_creates_completed_run_folder(self):
-        report = self.runner().run([])
-        self.assertEqual(report.load_results(), [])
-        self.assertEqual(json.loads(report.metadata_path.read_text())["question_count"], 0)
-        self.assertEqual(self.events, [])
-
-    def test_fail_fast_writes_partial_results(self):
-        report = self.runner().run([{"question": "bad"}, {"question": "good"}], continue_on_error=False)
-        self.assertEqual(report.processed_count, 1)
-        self.assertEqual(len(report.load_results()), 1)
+    def test_fail_fast(self):
+        rows = self.run_batch([{"question": "bad"}, {"question": "good"}], continue_on_error=False)
+        self.assertEqual([r["status"] for r in rows], ["error"])
         self.assertEqual(self.events[-1], "stop")
+
+    def test_results_path_contains_exactly_the_rows_from_the_last_completed_run(self):
+        path = self.runs / "nested" / "agent.jsonl"
+        questions = [{"question": "Кто?", "reference_answer": "Test"}, {"question": "bad"}]
+        for _ in range(2):
+            rows = self.run_batch(questions, results_path=path)
+            written = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(written, rows)
+        self.assertEqual([row["status"] for row in written], ["ok", "error"])
+        self.assertIn("question failure", written[1]["error"])
 
     def test_direct_string_response(self):
         class Simple:
             def ask(self, q):
                 return "ok:" + q
-        report = self.runner(lambda: CallableAdapter(Simple)).run([{"question": "ping"}])
-        self.assertEqual(report.load_results()[0]["answer"], "ok:ping")
-
-    def test_input_answer_does_not_mask_prediction(self):
-        report = self.runner().run([{"question": "hello", "answer": "gold"}])
-        self.assertEqual(report.load_results()[0]["answer"], "HELLO")
-
-    def test_new_folder_per_run(self):
-        runner = self.runner()
-        first = runner.run([{"question": "a"}])
-        second = runner.run([{"question": "a"}])
-        self.assertNotEqual(first.run_dir, second.run_dir)
-        self.assertTrue(first.run_dir.exists())
-        self.assertTrue(second.run_dir.exists())
-
-    def test_explicit_run_id_collision_and_path_traversal_rejected(self):
-        runner = self.runner()
-        runner.run([], run_id="my_run")
-        with self.assertRaises(FileExistsError):
-            runner.run([], run_id="my_run")
-        for value in ("../bad", "/tmp/bad", "..", "has space"):
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                runner.run([], run_id=value)
+        rows = self.run_batch([{"question": "ping"}], lambda: CallableAdapter(Simple))
+        self.assertEqual(rows[0]["answer"], "ok:ping")
 
     def test_subprocess_agent_lifecycle_and_second_run(self):
         adapters = []
@@ -147,97 +115,103 @@ class RunnerTests(unittest.TestCase):
             adapter = SubprocessJSONLAdapter([sys.executable, "-u", str(ECHO)], startup_timeout=3)
             adapters.append(adapter)
             return adapter
-        runner = self.runner(factory)
+        runner = AgentRunner(lambda _: factory())
         for _ in range(2):
-            report = runner.run([{"id": "X", "question": "hello"}])
-            self.assertEqual(report.load_results()[0]["answer"], "HELLO")
+            rows = list(runner.run([{"id": "X", "question": "hello"}], self.runs))
+            self.assertEqual(rows[0]["answer"], "HELLO")
         self.assertEqual(len(adapters), 2)
         self.assertTrue(all(a.process is None for a in adapters))
-        self.assertTrue((report.run_dir / "artifacts" / "agent.stderr.log").exists())
-
-    def test_subprocess_agent_persists_stderr_log(self):
-        code = (
-            "import json,sys; "
-            "print('agent diagnostic',file=sys.stderr,flush=True); "
-            "print(json.dumps({'ready':True}),flush=True); "
-            "line=json.loads(input()); "
-            "print(json.dumps({'id':line['id'],'answer':'ok'}),flush=True)"
-        )
-        report = self.runner(lambda: SubprocessJSONLAdapter([sys.executable, "-u", "-c", code], startup_timeout=3)).run([{"question": "x"}])
-        log = (report.run_dir / "artifacts" / "agent.stderr.log").read_text()
-        self.assertIn("agent diagnostic", log)
-
     def test_subprocess_worker_rejects_bad_startup(self):
         code = "import json; print(json.dumps({'ready':False,'error':'broken'}), flush=True)"
         factory = lambda: SubprocessJSONLAdapter([sys.executable, "-u", "-c", code], startup_timeout=3)
         with self.assertRaisesRegex(RuntimeError, "broken"):
-            self.runner(factory).run([{"question": "hello"}])
+            self.run_batch([{"question": "hello"}], factory)
 
     def test_subprocess_worker_times_out_and_stops(self):
         code = "import json,time; print(json.dumps({'ready':True}),flush=True); input(); time.sleep(4)"
         adapter = SubprocessJSONLAdapter([sys.executable, "-u", "-c", code], startup_timeout=3, question_timeout=0.2)
-        report = self.runner(lambda: adapter).run([{"question": "hello"}])
-        self.assertEqual(report.failed_count, 1)
-        self.assertIn("TimeoutError", report.load_results()[0]["error"])
+        rows = self.run_batch([{"question": "hello"}], lambda: adapter)
+        self.assertEqual(rows[0]["status"], "error")
+        self.assertIn("TimeoutError", rows[0]["error"])
         self.assertIsNone(adapter.process)
 
     def test_subprocess_worker_rejects_protocol_mismatch(self):
         code = "import json; print(json.dumps({'ready':True}),flush=True); input(); print(json.dumps({'id':999,'answer':'ok'}),flush=True)"
-        report = self.runner(lambda: SubprocessJSONLAdapter([sys.executable, "-u", "-c", code], startup_timeout=3)).run([{"question": "hi"}])
-        self.assertEqual(report.failed_count, 1)
-        self.assertIn("mismatch", report.load_results()[0]["error"])
+        rows = self.run_batch([{"question": "hi"}], lambda: SubprocessJSONLAdapter([sys.executable, "-u", "-c", code], startup_timeout=3))
+        self.assertEqual(rows[0]["status"], "error")
+        self.assertIn("mismatch", rows[0]["error"])
 
     def test_subprocess_worker_no_stdout_logs_allowed(self):
         code = "print('debug',flush=True)"
         with self.assertRaisesRegex(RuntimeError, "non-JSON"):
-            self.runner(lambda: SubprocessJSONLAdapter([sys.executable, "-u", "-c", code], startup_timeout=3)).run([{"question": "hi"}])
+            self.run_batch([{"question": "hi"}], lambda: SubprocessJSONLAdapter([sys.executable, "-u", "-c", code], startup_timeout=3))
 
-    def test_madqa_adapter_with_stubbed_upstream_module(self):
-        root = Path(self.temp.name)
-        (root / "utils.py").write_text(
-            "class WhooshSearchEngine:\n"
-            "    def __init__(self, source): self.source = source\n", encoding="utf-8")
-        (root / "vllm_agent.py").write_text(
-            "from utils import WhooshSearchEngine\n"
-            "class VLLMSearchAgent:\n"
-            "    def __init__(self, engine, model, base_url, api_key): self.engine = engine\n"
-            "    def answer_question(self, question, max_iterations, top_k):\n"
-            "        print('ordinary debug log should NOT break stdout JSON protocol')\n"
-            "        return {'answer':[question.upper()], 'citations':[], 'trajectory':[], 'iterations':1}\n",
-            encoding="utf-8")
-        (root / "ocr.jsonl").write_text("{}\n", encoding="utf-8")
-        adapter = MADQAAdapter(agent_dir=root, ocr_file="ocr.jsonl", model="stub", startup_timeout=3)
-        report = self.runner(lambda: adapter).run([{"question": "hello", "answer_variants": [["HELLO"]]}])
-        self.assertEqual(report.load_results()[0]["answer"], ["HELLO"])
-        self.assertEqual(report.load_results()[0]["iterations"], 1)
-        self.assertEqual(report.failed_count, 0)
-        self.assertIsNone(adapter.process)
-
-    def test_madqa_validates_settings_without_madqa_dependency(self):
-        with self.assertRaises(ValueError):
-            MADQAAdapter(agent_dir=self.temp.name, model="m", top_k=0)
-
-    def test_madqa_missing_repo_fails_cleanly(self):
-        adapter = MADQAAdapter(agent_dir=self.temp.name, model="m", startup_timeout=3)
-        with self.assertRaisesRegex(RuntimeError, "MADQA files"):
-            self.runner(lambda: adapter).run([{"question": "hi"}])
-        self.assertIsNone(adapter.process)
 
     def test_app_module_cli_end_to_end(self):
         proc = subprocess.run([
             sys.executable, "-m", "app",
-            "--adapter", "jsonl",
-            "--agent-command", f'"{sys.executable}" -u "{ECHO}"',
+            "--agent-command", f'"{sys.executable}" -u "{ECHO.name}"',
+            "--agent-cwd", str(ECHO.parent),
             "--questions", str(ROOT / "examples" / "questions.jsonl"),
-            "--runs-root", str(self.runs),
+            "--run-dir", str(self.runs),
         ], cwd=ROOT, text=True, capture_output=True, timeout=10)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        report_dir = Path(proc.stdout.strip())
-        self.assertTrue(report_dir.is_dir())
-        rows = [json.loads(line) for line in (report_dir / "results.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertFalse(self.runs.exists())
+        rows = [json.loads(line) for line in proc.stdout.splitlines()]
         self.assertTrue(rows)
         self.assertEqual(rows[0]["answer"], rows[0]["question"].upper())
         self.assertEqual(len(rows), 2)
+
+    def test_skim_cli_preserves_native_trajectory_and_reuses_index(self):
+        temp_dir = Path(self.temp.name)
+        corpus_path = temp_dir / "corpus.jsonl"
+        corpus_path.write_text('{"docid":"doc1","text":"Документ"}\n', encoding="utf-8")
+        (temp_dir / "agent_search.py").write_text(dedent('''\
+            import os
+
+            def as_units(docs):
+                assert docs[0]["doc_id"] == "doc1"
+                return docs
+
+            class Agent:
+                def index(self, units):
+                    assert not hasattr(self, "calls")
+                    self.calls = 0
+
+                def search(self, question, k):
+                    self.calls += 1
+                    self.last_trajectory_meta = {
+                        "final_answer": f"{self.calls}: {question}",
+                        "trajectory": [{"action": "search_s", "args": {"query": question},
+                                        "observation": "Document content"}],
+                        "stopped": "answer",
+                    }
+                    return ["doc1"]
+
+            def build_agent(strategy, **options):
+                assert strategy == "sieve_bm25"
+                assert options["model"] == "local-test"
+                os.write(1, b"Skim diagnostic message\\n")
+                return Agent()
+            '''), encoding="utf-8")
+        results_path = temp_dir / "results" / "runner_results.jsonl"
+        proc = subprocess.run([
+            sys.executable, "-m", "app", "--adapter", "skim",
+            "--skim-python", sys.executable, "--skim-model", "local-test",
+            "--skim-corpus", str(corpus_path),
+            "--questions", str(ROOT / "examples" / "questions.jsonl"),
+            "--run-dir", str(self.runs), "--results-path", str(results_path),
+        ], cwd=ROOT, env={**os.environ, "PYTHONPATH": str(temp_dir)},
+            text=True, capture_output=True, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rows = [json.loads(line) for line in results_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(rows, [json.loads(line) for line in proc.stdout.splitlines()])
+        self.assertEqual([row["answer"].split(":", 1)[0] for row in rows], ["1", "2"])
+        self.assertEqual(rows[0]["trajectory"], [
+            {"action": "search_s", "args": {"query": rows[0]["question"]}, "observation": "Document content"},
+        ])
+        self.assertEqual(rows[0]["ranking"], ["doc1"])
+        self.assertEqual(rows[0]["stopped"], "answer")
 
     def test_question_loading(self):
         inp = Path(self.temp.name) / "questions.jsonl"

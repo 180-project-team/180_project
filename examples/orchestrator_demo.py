@@ -27,13 +27,14 @@ class ExampleOrchestrator:
         if self.llm is not None:
             self.llm.stop()
 
-    def execute(self, questions):
-        return self.runner.run(questions, metadata={"created_by": "example_orchestrator"})
+    def execute(self, questions, run_dir: str | Path, *, results_path: str | Path | None = None):
+        destination = Path(run_dir) / "runner_results.jsonl" if results_path is None else Path(results_path)
+        return list(self.runner.run(questions, run_dir, results_path=destination))
 
 
 if __name__ == "__main__":
     agent = Path(__file__).resolve().parent / "echo_agent.py"
-    runner = AgentRunner(lambda: SubprocessJSONLAdapter([sys.executable, "-u", str(agent)]))
+    runner = AgentRunner(lambda _: SubprocessJSONLAdapter([sys.executable, "-u", str(agent)]))
     with ExampleOrchestrator(runner) as orchestrator:
-        report = orchestrator.execute(load_questions(agent.parent / "questions.jsonl"))
-        print(f"Artifacts: {report.run_dir}")
+        for row in orchestrator.execute(load_questions(agent.parent / "questions.jsonl"), Path("runs/demo")):
+            print(row)
